@@ -3,13 +3,28 @@ import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
 
+import 'package:flutter/foundation.dart';
+
 import 'api_client.dart';
+import 'notifications_service.dart';
 
 class AppUser {
   final String id;
   final String email;
 
   const AppUser({required this.id, required this.email});
+}
+
+class ResidentAddress {
+  final int entrance;
+  final int floor;
+  final int apartment;
+
+  const ResidentAddress({
+    required this.entrance,
+    required this.floor,
+    required this.apartment,
+  });
 }
 
 class AuthService {
@@ -111,6 +126,8 @@ class AuthService {
 
       _currentUser = AppUser(id: userId, email: email.trim());
       _controller.add(_currentUser);
+      // Регистрируем FCM-токен на новом аккаунте, чтобы бэк начал слать пуши.
+      unawaited(NotificationsService.instance.syncTokenWithBackend());
       return null;
     } on DioException catch (e) {
       final msg = e.response?.data?['error']?.toString() ?? '';
@@ -140,6 +157,7 @@ class AuthService {
 
       _currentUser = AppUser(id: userId, email: email.trim());
       _controller.add(_currentUser);
+      unawaited(NotificationsService.instance.syncTokenWithBackend());
       return null;
     } on DioException catch (e) {
       if (e.response?.statusCode == 401) {
@@ -152,6 +170,9 @@ class AuthService {
   }
 
   Future<void> signOut() async {
+    // Сначала снимаем FCM-токен с этого аккаунта на бэке, пока JWT ещё
+    // валиден — иначе бэк продолжит слать пуши на старый токен.
+    await NotificationsService.instance.deleteTokenOnBackend();
     await _api.clearSession();
     _currentUser = null;
     _controller.add(null);
@@ -166,9 +187,52 @@ class AuthService {
     }
   }
 
+  /// Возвращает адрес жильца внутри ЖК (подъезд/этаж/квартира).
+  ///
+  /// Источник — `GET /auth/me`. Бэк после approve верификации копирует
+  /// `entrance/floor/apartment` из `verification_requests` в `profiles`,
+  /// и отсюда они приходят в `/auth/me`. Поля парсятся устойчиво — `int`,
+  /// `String` или `null` все обрабатываются.
+  Future<ResidentAddress?> getResidentAddress() async {
+    try {
+      final res = await _api.get('/auth/me');
+      final data = res.data as Map;
+      final entrance = _parseInt(data['entrance']);
+      final floor = _parseInt(data['floor']);
+      final apartment = _parseInt(data['apartment']);
+      debugPrint(
+          '[Auth] /auth/me address: entrance=${data['entrance']} '
+          'floor=${data['floor']} apartment=${data['apartment']}');
+      if (entrance != null && floor != null) {
+        return ResidentAddress(
+          entrance: entrance,
+          floor: floor,
+          apartment: apartment ?? 0,
+        );
+      }
+    } catch (e) {
+      debugPrint('[Auth] /auth/me failed: $e');
+    }
+    return null;
+  }
+
+  static int? _parseInt(dynamic raw) {
+    if (raw == null) return null;
+    if (raw is num) return raw.toInt();
+    if (raw is String) {
+      final trimmed = raw.trim();
+      if (trimmed.isEmpty) return null;
+      return int.tryParse(trimmed);
+    }
+    return null;
+  }
+
   Future<String?> submitVerificationRequest({
     required String requestedRole,
     required List<PlatformFile> documents,
+    required int entrance,
+    required int floor,
+    required int apartment,
     String? comment,
   }) async {
     if (documents.isEmpty) return 'Прикрепите хотя бы один документ';
@@ -177,6 +241,9 @@ class AuthService {
       final res = await _api.post('/verification/requests', data: {
         'requested_role': requestedRole,
         'comment': comment?.trim() ?? '',
+        'entrance': entrance,
+        'floor': floor,
+        'apartment': apartment,
       });
 
       final verId = res.data['id'] as String;
@@ -191,6 +258,7 @@ class AuthService {
       }
 
       await _api.postForm('/verification/requests/$verId/documents', formData);
+
       return null;
     } on DioException catch (e) {
       return e.response?.data?['error']?.toString() ?? 'Ошибка отправки документов';

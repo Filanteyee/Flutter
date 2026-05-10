@@ -1,4 +1,4 @@
-package com.example.car_rental_app
+package kz.smartresidency.app
 
 import io.flutter.embedding.android.FlutterActivity
 

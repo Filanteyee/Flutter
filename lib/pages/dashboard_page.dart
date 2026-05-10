@@ -1,12 +1,21 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import '../models/sensor.dart';
 import '../services/api_client.dart';
+import '../services/auth_service.dart';
+import '../services/notifications_service.dart';
+import '../services/sensor_service.dart';
+import '../widgets/sensor_widgets.dart';
+import 'admin_sensors_page.dart';
 import 'admin_verification_page.dart';
 import 'announcements_page.dart';
 import 'barrier_page.dart';
 import 'guests_page.dart';
 import 'payments_page.dart';
 import 'profile_page.dart';
+import 'sensors_page.dart';
 import 'service_requests_page.dart';
 import 'services_page.dart';
 
@@ -17,41 +26,95 @@ class DashboardPage extends StatefulWidget {
   State<DashboardPage> createState() => _DashboardPageState();
 }
 
-class _DashboardPageState extends State<DashboardPage> {
+class _DashboardPageState extends State<DashboardPage>
+    with WidgetsBindingObserver {
   final ApiClient _api = ApiClient.instance;
 
   int _index = 0;
   bool _loadingRole = true;
   String _role = 'resident';
+  bool _isLoggedIn = false;
+  String _verificationStatus = 'not_submitted';
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadRole();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _loadRole();
+    }
   }
 
   Future<void> _loadRole() async {
     try {
       if (!_api.isLoggedIn) {
-        setState(() { _role = 'resident'; _loadingRole = false; });
+        setState(() {
+          _role = 'resident';
+          _isLoggedIn = false;
+          _verificationStatus = 'not_submitted';
+          _loadingRole = false;
+        });
         return;
       }
       final res = await _api.get('/auth/me');
       final role = (res.data['role'] ?? 'resident').toString();
+      final verification =
+          (res.data['verification_status'] ?? 'not_submitted').toString();
       await _api.updateRole(role);
       if (!mounted) return;
       setState(() {
         _role = role;
+        _isLoggedIn = true;
+        _verificationStatus = verification;
         _loadingRole = false;
       });
+      _consumePendingNotification();
     } catch (_) {
       if (!mounted) return;
-      setState(() { _role = 'resident'; _loadingRole = false; });
+      setState(() {
+        _role = 'resident';
+        _isLoggedIn = false;
+        _verificationStatus = 'not_submitted';
+        _loadingRole = false;
+      });
     }
   }
 
+  void _consumePendingNotification() {
+    if (!mounted || !_isLoggedIn) return;
+    final data = NotificationsService.instance.consumePendingOpenedMessage();
+    if (data == null) return;
+    if (data['kind'] != 'sensor_alert') return;
+    final eventId = data['event_id'];
+    final isAdmin = _role == 'admin';
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => isAdmin
+            ? AdminSensorsPage(highlightEventId: eventId)
+            : SensorsPage(highlightEventId: eventId),
+      ),
+    );
+  }
+
   List<Widget> get _pages => [
-    _HomeOverviewTab(role: _role),
+    _HomeOverviewTab(
+      role: _role,
+      isLoggedIn: _isLoggedIn,
+      verificationStatus: _verificationStatus,
+      onRefresh: _loadRole,
+    ),
     const ServiceRequestsPage(),
     const ServicesPage(),
     const PaymentsPage(),
@@ -95,7 +158,12 @@ class _DashboardPageState extends State<DashboardPage> {
         currentIndex: _index,
         items: _items,
         type: BottomNavigationBarType.fixed,
-        onTap: (i) => setState(() => _index = i),
+        onTap: (i) {
+          setState(() => _index = i);
+          // При возврате на главную перечитываем роль и статус верификации,
+          // чтобы карточка датчиков сразу отразила свежее решение админа.
+          if (i == 0) _loadRole();
+        },
       ),
     );
   }
@@ -104,10 +172,19 @@ class _DashboardPageState extends State<DashboardPage> {
 
 class _HomeOverviewTab extends StatelessWidget {
   final String role;
+  final bool isLoggedIn;
+  final String verificationStatus;
+  final Future<void> Function() onRefresh;
 
-  const _HomeOverviewTab({required this.role});
+  const _HomeOverviewTab({
+    required this.role,
+    required this.isLoggedIn,
+    required this.verificationStatus,
+    required this.onRefresh,
+  });
 
   bool get _isAdmin => role == 'admin';
+  bool get _isApprovedResident => verificationStatus == 'approved';
 
   @override
   Widget build(BuildContext context) {
@@ -116,7 +193,9 @@ class _HomeOverviewTab extends StatelessWidget {
         title: Text(_isAdmin ? 'Панель администратора' : 'Главная'),
       ),
       body: SafeArea(
-      child: ListView(
+      child: RefreshIndicator(
+        onRefresh: onRefresh,
+        child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
           const SizedBox(height: 6),
@@ -163,6 +242,8 @@ class _HomeOverviewTab extends StatelessWidget {
                 ),
               ],
             ),
+            const SizedBox(height: 14),
+            const _SensorsStatusCard(mode: _SensorsCardMode.admin),
             const SizedBox(height: 14),
             _ActionGrid(
               children: [
@@ -234,6 +315,7 @@ class _HomeOverviewTab extends StatelessWidget {
               ],
             ),
           ] else ...[
+            // Жилец/Гость: верхняя строка кнопок и блок датчиков ниже.
             Row(
               children: [
                 Expanded(
@@ -268,6 +350,14 @@ class _HomeOverviewTab extends StatelessWidget {
                   ),
                 ),
               ],
+            ),
+            const SizedBox(height: 14),
+            _SensorsStatusCard(
+              mode: !isLoggedIn
+                  ? _SensorsCardMode.guest
+                  : _isApprovedResident
+                      ? _SensorsCardMode.resident
+                      : _SensorsCardMode.unverified,
             ),
             const SizedBox(height: 14),
             _ActionGrid(
@@ -315,6 +405,7 @@ class _HomeOverviewTab extends StatelessWidget {
             ),
           ],
         ],
+      ),
       ),
     ),
     );
@@ -395,6 +486,214 @@ class _ActionGrid extends StatelessWidget {
     }
 
     return Column(children: rows);
+  }
+}
+
+enum _SensorsCardMode { admin, resident, unverified, guest }
+
+class _SensorsStatusCard extends StatefulWidget {
+  final _SensorsCardMode mode;
+
+  const _SensorsStatusCard({required this.mode});
+
+  @override
+  State<_SensorsStatusCard> createState() => _SensorsStatusCardState();
+}
+
+class _SensorsStatusCardState extends State<_SensorsStatusCard> {
+  final SensorService _service = SensorService.instance;
+
+  bool _loading = true;
+  bool _hasAlert = false;
+  int? _entrance;
+  StreamSubscription<List<SensorEvent>>? _eventsSub;
+
+  bool get _interactive =>
+      widget.mode == _SensorsCardMode.admin ||
+      widget.mode == _SensorsCardMode.resident;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_interactive) {
+      _load();
+      _eventsSub = _service.eventsStream.listen((events) {
+        if (!mounted) return;
+        final relevant = events.where((e) {
+          if (e.status != EventStatus.confirmed) return false;
+          if (widget.mode == _SensorsCardMode.admin) return true;
+          return _entrance != null && e.entranceNum == _entrance;
+        });
+        setState(() => _hasAlert = relevant.isNotEmpty);
+      });
+    } else {
+      _loading = false;
+    }
+  }
+
+  @override
+  void dispose() {
+    _eventsSub?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant _SensorsStatusCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.mode != widget.mode) {
+      if (_interactive) {
+        setState(() => _loading = true);
+        _load();
+      } else {
+        setState(() {
+          _loading = false;
+          _hasAlert = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _load() async {
+    try {
+      int? entrance;
+      if (widget.mode == _SensorsCardMode.resident) {
+        final address = await AuthService().getResidentAddress();
+        entrance = address?.entrance;
+      }
+      final events = await _service.getEvents(
+        entrance: widget.mode == _SensorsCardMode.admin ? null : entrance,
+        status: EventStatus.confirmed,
+      );
+      if (!mounted) return;
+      setState(() {
+        _entrance = entrance;
+        _hasAlert = events.isNotEmpty;
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+    }
+  }
+
+  void _open() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => widget.mode == _SensorsCardMode.admin
+            ? const AdminSensorsPage()
+            : const SensorsPage(),
+      ),
+    ).then((_) => _load());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final disabled = !_interactive;
+
+    final Color color;
+    final IconData icon;
+    final String title;
+    final String subtitle;
+
+    if (widget.mode == _SensorsCardMode.guest) {
+      color = Colors.grey;
+      icon = Icons.lock_outline;
+      title = 'Доступно после входа';
+      subtitle = 'Войдите в аккаунт, чтобы видеть состояние датчиков';
+    } else if (widget.mode == _SensorsCardMode.unverified) {
+      color = Colors.grey;
+      icon = Icons.verified_user_outlined;
+      title = 'Подтвердите статус';
+      subtitle =
+          'Отправьте документы и адрес квартиры — после проверки появится доступ';
+    } else if (widget.mode == _SensorsCardMode.resident && _entrance == null) {
+      // Подтверждён, но локально не сохранён адрес — попросим повторить шаг.
+      color = Colors.grey;
+      icon = Icons.edit_location_alt_outlined;
+      title = 'Укажите подъезд и квартиру';
+      subtitle = 'Откройте «Подтвердить статус» и заполните адрес';
+    } else {
+      color = _hasAlert ? Colors.red : Colors.green;
+      icon = _hasAlert ? Icons.warning_amber_rounded : Icons.shield_outlined;
+      title = _hasAlert ? 'Есть тревога!' : 'Всё в норме';
+      subtitle = widget.mode == _SensorsCardMode.admin
+          ? (_hasAlert
+              ? 'Откройте события и подтвердите статус'
+              : 'Все датчики ЖК в норме')
+          : (_hasAlert
+              ? 'Подтверждённое событие в вашем подъезде'
+              : 'Датчики вашего подъезда работают штатно');
+    }
+
+    final canTap = _interactive &&
+        !_loading &&
+        !(widget.mode == _SensorsCardMode.resident && _entrance == null);
+
+    final card = Card(
+      child: Opacity(
+        opacity: disabled ? 0.65 : 1.0,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(22),
+          onTap: canTap ? _open : null,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: color.withOpacity(0.18),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(icon, color: color, size: 24),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text(
+                            'Датчики',
+                            style: Theme.of(context).textTheme.titleSmall,
+                          ),
+                          const SizedBox(width: 8),
+                          if (_loading)
+                            const SizedBox(
+                              width: 12,
+                              height: 12,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        title,
+                        style: Theme.of(context)
+                            .textTheme
+                            .titleMedium
+                            ?.copyWith(color: color, fontWeight: FontWeight.w700),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(canTap ? Icons.chevron_right : Icons.lock_outline,
+                    color: canTap ? null : Colors.grey),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    return PulsingAlert(active: canTap && _hasAlert, child: card);
   }
 }
 

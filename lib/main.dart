@@ -1,15 +1,22 @@
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 
 import 'core/app_state.dart';
 import 'core/app_state_scope.dart';
+import 'firebase_options.dart';
 import 'pages/dashboard_page.dart';
 import 'services/api_client.dart';
 import 'services/auth_service.dart';
+import 'services/notifications_service.dart';
 import 'theme/app_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await ApiClient.init();
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+  await NotificationsService.instance.init();
   runApp(const _Root());
 }
 

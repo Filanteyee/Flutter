@@ -2,8 +2,8 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter_pdfview/flutter_pdfview.dart';
-import 'package:http/http.dart' as http;
 import 'package:open_file/open_file.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -136,70 +136,151 @@ class _AdminVerificationPageState extends State<AdminVerificationPage> {
       .replaceFirst('http://localhost:', 'http://10.0.2.2:')
       .replaceFirst('http://127.0.0.1:', 'http://10.0.2.2:');
 
+  /// Собираем список URL-кандидатов, по которым может лежать файл.
+  /// Бэкенд может отдать как полный URL, так и относительный путь, плюс
+  /// статика на `/uploads/...` живёт ВНЕ `/api/v1`. Перебираем все варианты,
+  /// первый успешный (HTTP 200 с непустым телом) — берём.
+  List<String> _buildUrlCandidates(_VerificationDocumentItem doc) {
+    final urls = <String>{};
+    final host = ApiClient.baseHost;
+    final api = ApiClient.baseUrl;
+
+    void add(String? raw) {
+      if (raw == null || raw.isEmpty) return;
+      if (raw.startsWith('http://') || raw.startsWith('https://')) {
+        urls.add(_fixUrl(raw));
+      } else if (raw.startsWith('/')) {
+        urls.add('$host$raw');
+      } else {
+        urls.add('$host/$raw');
+      }
+    }
+
+    // 1) То, что вернул сервер в поле url.
+    add(doc.url);
+
+    // 2) Статика по file_path (типичная Go-раздача через /uploads/).
+    final fp = doc.filePath;
+    if (fp.isNotEmpty) {
+      final clean = fp.startsWith('/') ? fp.substring(1) : fp;
+      urls.add('$host/uploads/$clean');
+      urls.add('$host/$clean');
+    }
+
+    // 3) REST-стиль: скачивание по id документа через API.
+    if (doc.id.isNotEmpty) {
+      urls.add('$api/verification/documents/${doc.id}/download');
+      urls.add('$api/verification/documents/${doc.id}');
+    }
+
+    return urls.toList();
+  }
+
+  bool _looksLikeImage(String name, String contentType) {
+    final n = name.toLowerCase();
+    if (n.endsWith('.jpg') || n.endsWith('.jpeg') || n.endsWith('.png') ||
+        n.endsWith('.gif') || n.endsWith('.webp') || n.endsWith('.bmp')) {
+      return true;
+    }
+    return contentType.toLowerCase().startsWith('image/');
+  }
+
+  bool _looksLikePdf(String name, String contentType) {
+    if (name.toLowerCase().endsWith('.pdf')) return true;
+    return contentType.toLowerCase().contains('pdf');
+  }
+
+  /// Имя файла без слешей и зарезервированных символов Windows/Android FS.
+  String _sanitizeFileName(String name) =>
+      name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+
   Future<void> _openFile(_VerificationDocumentItem doc, BuildContext dialogContext) async {
     Navigator.of(dialogContext).pop();
 
-    final rawUrl = doc.url.isNotEmpty ? doc.url : '${ApiClient.baseUrl}/uploads/${doc.filePath}';
-    final url = _fixUrl(rawUrl);
     final fileName = doc.fileName.isNotEmpty ? doc.fileName : 'document';
-    final lowerName = fileName.toLowerCase();
-    final isImage = lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg') || lowerName.endsWith('.png');
 
-    // Все форматы скачиваем через http.get — единый путь с понятными сообщениями об ошибках
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Загрузка…'), duration: Duration(seconds: 60)),
     );
 
-    try {
-      final response = await http.get(Uri.parse(url));
+    final candidates = _buildUrlCandidates(doc);
+    Response<List<int>>? success;
+    String lastUrl = '';
+    int? lastStatus;
+    String? networkError;
 
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-
-      if (response.statusCode != 200) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Файл не найден (${response.statusCode})')),
-        );
-        return;
+    for (final url in candidates) {
+      lastUrl = url;
+      try {
+        final res = await _api.downloadBytes(url);
+        lastStatus = res.statusCode;
+        final body = res.data;
+        if (res.statusCode == 200 && body != null && body.isNotEmpty) {
+          success = res;
+          break;
+        }
+      } on DioException catch (e) {
+        // Сетевая ошибка — запоминаем и пробуем следующего кандидата.
+        networkError = e.message ?? e.toString();
+      } catch (e) {
+        networkError = e.toString();
       }
+    }
 
-      if (isImage) {
-        Navigator.push(context, MaterialPageRoute(
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+
+    if (success == null) {
+      final reason = lastStatus != null
+          ? 'HTTP $lastStatus'
+          : (networkError != null ? 'сеть: $networkError' : 'неизвестно');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Не удалось открыть файл ($reason)\n$lastUrl'),
+          duration: const Duration(seconds: 6),
+        ),
+      );
+      return;
+    }
+
+    final bytes = Uint8List.fromList(success.data!);
+    final contentType = success.headers.value('content-type') ?? '';
+
+    try {
+      if (_looksLikeImage(fileName, contentType)) {
+        await Navigator.push(context, MaterialPageRoute(
           builder: (_) => Scaffold(
-            appBar: AppBar(title: const Text('Просмотр изображения')),
+            appBar: AppBar(title: Text(fileName, maxLines: 1, overflow: TextOverflow.ellipsis)),
             body: InteractiveViewer(
               minScale: 0.5,
-              maxScale: 4,
-              child: Center(child: Image.memory(response.bodyBytes)),
+              maxScale: 5,
+              child: Center(child: Image.memory(bytes)),
             ),
           ),
         ));
-      } else if (lowerName.endsWith('.pdf')) {
-        Navigator.push(context, MaterialPageRoute(
-          builder: (_) => _PdfViewerPage(
-            title: fileName,
-            bytes: response.bodyBytes,
-          ),
+      } else if (_looksLikePdf(fileName, contentType)) {
+        await Navigator.push(context, MaterialPageRoute(
+          builder: (_) => _PdfViewerPage(title: fileName, bytes: bytes),
         ));
       } else {
-        // Остальные форматы (docx, xlsx и т.д.) открываем нативным приложением
+        // doc/docx/xls/xlsx и прочее — сохраняем во временный файл и
+        // отдаём системному просмотрщику.
         final dir = await getTemporaryDirectory();
-        final file = File('${dir.path}/$fileName');
-        await file.writeAsBytes(response.bodyBytes);
+        final file = File('${dir.path}/${_sanitizeFileName(fileName)}');
+        await file.writeAsBytes(bytes, flush: true);
         if (!mounted) return;
         final result = await OpenFile.open(file.path);
         if (result.type != ResultType.done) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Нет приложения для формата: ${result.message}')),
+            SnackBar(content: Text('Нет приложения для этого формата: ${result.message}')),
           );
         }
       }
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка загрузки: $e')),
+        SnackBar(content: Text('Ошибка отображения файла: $e')),
       );
     }
   }

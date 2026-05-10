@@ -43,3 +43,24 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Secrets / Firebase / signing
+android/app/google-services.json
+ios/Runner/GoogleService-Info.plist
+lib/firebase_options.dart
+android/key.properties
+android/app/key.properties
+**/*.keystore
+**/*.jks
+**/*.p12
+
+# Local SDK paths (per-machine)
+android/local.properties
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Claude Code local settings
+.claude/settings.local.json

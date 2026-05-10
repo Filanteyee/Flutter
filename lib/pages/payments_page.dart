@@ -45,6 +45,9 @@ class PaymentsPage extends StatelessWidget {
                       ),
                     ),
                     FilledButton(
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size(96, 44),
+                      ),
                       onPressed: () {
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(content: Text('Демо: оплата будет подключена позже')),
