@@ -7,12 +7,14 @@ import '../services/api_client.dart';
 import '../services/auth_service.dart';
 import '../services/notifications_service.dart';
 import '../services/sensor_service.dart';
+import '../services/sse_service.dart';
 import '../widgets/sensor_widgets.dart';
 import 'admin_sensors_page.dart';
 import 'admin_verification_page.dart';
 import 'announcements_page.dart';
 import 'barrier_page.dart';
 import 'guests_page.dart';
+import 'notifications_history_page.dart';
 import 'payments_page.dart';
 import 'profile_page.dart';
 import 'sensors_page.dart';
@@ -79,6 +81,14 @@ class _DashboardPageState extends State<DashboardPage>
         _verificationStatus = verification;
         _loadingRole = false;
       });
+      // SSE-стрим только для админа — резидент пользуется FCM-пушами.
+      if (role == 'admin') {
+        SensorService.instance.attachSse(SseService.instance);
+        SseService.instance.connect();
+      } else {
+        SseService.instance.disconnect();
+        SensorService.instance.detachSse();
+      }
       _consumePendingNotification();
     } catch (_) {
       if (!mounted) return;
@@ -191,6 +201,19 @@ class _HomeOverviewTab extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         title: Text(_isAdmin ? 'Панель администратора' : 'Главная'),
+        actions: [
+          if (isLoggedIn)
+            IconButton(
+              icon: const Icon(Icons.notifications_outlined),
+              tooltip: 'История уведомлений',
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const NotificationsHistoryPage(),
+                ),
+              ),
+            ),
+        ],
       ),
       body: SafeArea(
       child: RefreshIndicator(
@@ -506,7 +529,9 @@ class _SensorsStatusCardState extends State<_SensorsStatusCard> {
   bool _loading = true;
   bool _hasAlert = false;
   int? _entrance;
+  int _offlineCount = 0;
   StreamSubscription<List<SensorEvent>>? _eventsSub;
+  StreamSubscription<List<Sensor>>? _sensorsSub;
 
   bool get _interactive =>
       widget.mode == _SensorsCardMode.admin ||
@@ -520,12 +545,24 @@ class _SensorsStatusCardState extends State<_SensorsStatusCard> {
       _eventsSub = _service.eventsStream.listen((events) {
         if (!mounted) return;
         final relevant = events.where((e) {
-          if (e.status != EventStatus.confirmed) return false;
+          if (e.status == EventStatus.falseAlarm ||
+              e.status == EventStatus.confirmed) return false;
           if (widget.mode == _SensorsCardMode.admin) return true;
           return _entrance != null && e.entranceNum == _entrance;
         });
         setState(() => _hasAlert = relevant.isNotEmpty);
       });
+      if (widget.mode == _SensorsCardMode.admin) {
+        _offlineCount = _service.sensorsSnapshot
+            .where((s) => s.status == SensorStatus.offline)
+            .length;
+        _sensorsSub = _service.sensorsStream.listen((sensors) {
+          if (!mounted) return;
+          setState(() => _offlineCount = sensors
+              .where((s) => s.status == SensorStatus.offline)
+              .length);
+        });
+      }
     } else {
       _loading = false;
     }
@@ -534,6 +571,7 @@ class _SensorsStatusCardState extends State<_SensorsStatusCard> {
   @override
   void dispose() {
     _eventsSub?.cancel();
+    _sensorsSub?.cancel();
     super.dispose();
   }
 
@@ -560,14 +598,27 @@ class _SensorsStatusCardState extends State<_SensorsStatusCard> {
         final address = await AuthService().getResidentAddress();
         entrance = address?.entrance;
       }
+      if (widget.mode == _SensorsCardMode.admin) {
+        final sensors = await _service.getAllSensors();
+        if (mounted) {
+          setState(() => _offlineCount = sensors
+              .where((s) => s.status == SensorStatus.offline)
+              .length);
+        }
+      }
       final events = await _service.getEvents(
         entrance: widget.mode == _SensorsCardMode.admin ? null : entrance,
-        status: EventStatus.confirmed,
       );
+      final hasAlert = events.any((e) {
+        if (e.status == EventStatus.falseAlarm ||
+            e.status == EventStatus.confirmed) return false;
+        if (widget.mode == _SensorsCardMode.admin) return true;
+        return entrance == null || e.entranceNum == entrance;
+      });
       if (!mounted) return;
       setState(() {
         _entrance = entrance;
-        _hasAlert = events.isNotEmpty;
+        _hasAlert = hasAlert;
         _loading = false;
       });
     } catch (_) {
@@ -681,6 +732,30 @@ class _SensorsStatusCardState extends State<_SensorsStatusCard> {
                         subtitle,
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
+                      if (widget.mode == _SensorsCardMode.admin &&
+                          !_loading &&
+                          _offlineCount > 0) ...[
+                        const SizedBox(height: 5),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 7, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.orange.withValues(alpha: 0.18),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            'Не на связи: $_offlineCount из '
+                            '${kEntrancesCount * kFloorsPerEntrance * 2}',
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelSmall
+                                ?.copyWith(
+                                  color: Colors.orange,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),

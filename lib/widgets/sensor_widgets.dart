@@ -13,6 +13,35 @@ Color sensorStatusColor(SensorStatus status) {
   }
 }
 
+/// Цвет датчика с учётом активного события:
+/// DETECTED=красный, CHECKING=оранжевый,
+/// CONFIRMED+датчик ещё ALERT=оранжевый, CONFIRMED+датчик NORMAL=зелёный.
+Color effectiveSensorColor(Sensor sensor, SensorEvent? activeEvent) {
+  if (activeEvent == null) return sensorStatusColor(sensor.status);
+  switch (activeEvent.status) {
+    case EventStatus.detected:
+      return Colors.red;
+    case EventStatus.checking:
+      return Colors.orange;
+    case EventStatus.confirmed:
+      return sensor.status == SensorStatus.normal ? Colors.green : Colors.orange;
+    case EventStatus.falseAlarm:
+      return sensorStatusColor(sensor.status);
+  }
+}
+
+/// Пульсация только при первичном обнаружении.
+bool effectiveIsAlert(SensorEvent? activeEvent) =>
+    activeEvent?.status == EventStatus.detected;
+
+/// Текстовый статус с учётом активного события.
+String effectiveStatusLabel(Sensor sensor, SensorEvent? activeEvent) {
+  if (activeEvent == null || activeEvent.status == EventStatus.falseAlarm) {
+    return sensor.status.label;
+  }
+  return activeEvent.status.label;
+}
+
 IconData sensorTypeIcon(SensorType type) {
   return type == SensorType.water
       ? Icons.water_drop_outlined
@@ -100,17 +129,19 @@ class _PulsingAlertState extends State<PulsingAlert>
 class FloorSensorCard extends StatelessWidget {
   final Sensor sensor;
   final VoidCallback? onTap;
+  final SensorEvent? activeEvent;
 
   const FloorSensorCard({
     super.key,
     required this.sensor,
     this.onTap,
+    this.activeEvent,
   });
 
   @override
   Widget build(BuildContext context) {
-    final color = sensorStatusColor(sensor.status);
-    final isAlert = sensor.status == SensorStatus.alert;
+    final color = effectiveSensorColor(sensor, activeEvent);
+    final isAlert = effectiveIsAlert(activeEvent);
 
     final body = Card(
       child: InkWell(
@@ -149,7 +180,7 @@ class FloorSensorCard extends StatelessWidget {
               ),
               const SizedBox(height: 4),
               Text(
-                sensor.status.label,
+                effectiveStatusLabel(sensor, activeEvent),
                 style: Theme.of(context).textTheme.titleMedium?.copyWith(
                       color: color,
                       fontWeight: FontWeight.w700,
@@ -177,6 +208,8 @@ class FloorSummaryRow extends StatelessWidget {
   final Sensor? smoke;
   final bool highlightCurrent;
   final VoidCallback onTap;
+  final SensorEvent? waterEvent;
+  final SensorEvent? smokeEvent;
 
   const FloorSummaryRow({
     super.key,
@@ -185,6 +218,8 @@ class FloorSummaryRow extends StatelessWidget {
     required this.smoke,
     required this.highlightCurrent,
     required this.onTap,
+    this.waterEvent,
+    this.smokeEvent,
   });
 
   @override
@@ -225,9 +260,9 @@ class FloorSummaryRow extends StatelessWidget {
                   style: Theme.of(context).textTheme.titleSmall,
                 ),
               ),
-              _MiniSensorBadge(sensor: water),
+              _MiniSensorBadge(sensor: water, activeEvent: waterEvent),
               const SizedBox(width: 8),
-              _MiniSensorBadge(sensor: smoke),
+              _MiniSensorBadge(sensor: smoke, activeEvent: smokeEvent),
               const SizedBox(width: 6),
               const Icon(Icons.chevron_right),
             ],
@@ -240,8 +275,9 @@ class FloorSummaryRow extends StatelessWidget {
 
 class _MiniSensorBadge extends StatelessWidget {
   final Sensor? sensor;
+  final SensorEvent? activeEvent;
 
-  const _MiniSensorBadge({required this.sensor});
+  const _MiniSensorBadge({required this.sensor, this.activeEvent});
 
   @override
   Widget build(BuildContext context) {
@@ -249,8 +285,8 @@ class _MiniSensorBadge extends StatelessWidget {
       return const SizedBox(width: 28);
     }
 
-    final color = sensorStatusColor(sensor!.status);
-    final isAlert = sensor!.status == SensorStatus.alert;
+    final color = effectiveSensorColor(sensor!, activeEvent);
+    final isAlert = effectiveIsAlert(activeEvent);
 
     final badge = Container(
       width: 30,

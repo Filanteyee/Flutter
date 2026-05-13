@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io' show Platform;
 
 import 'package:dio/dio.dart';
@@ -15,6 +16,45 @@ import 'sensor_service.dart';
 /// Ключ в SharedPreferences для payload-а, по которому пользователь
 /// открыл локальный баннер пока main-изолят был не активен.
 const _kPendingTapPrefsKey = 'pending_notification_event_id';
+
+const _kHistoryPrefsKey = 'notifications_history';
+const _kMaxHistory = 50;
+
+/// Запись истории пуш-уведомлений. Хранится в SharedPreferences как JSON.
+class NotificationHistoryItem {
+  final String eventId;
+  final String title;
+  final String body;
+  final String threatType;
+  final DateTime receivedAt;
+
+  const NotificationHistoryItem({
+    required this.eventId,
+    required this.title,
+    required this.body,
+    required this.threatType,
+    required this.receivedAt,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'event_id': eventId,
+        'title': title,
+        'body': body,
+        'threat_type': threatType,
+        'received_at': receivedAt.toIso8601String(),
+      };
+
+  factory NotificationHistoryItem.fromJson(Map<String, dynamic> json) =>
+      NotificationHistoryItem(
+        eventId: json['event_id']?.toString() ?? '',
+        title: json['title']?.toString() ?? '',
+        body: json['body']?.toString() ?? '',
+        threatType: json['threat_type']?.toString() ?? '',
+        receivedAt: DateTime.tryParse(
+                json['received_at']?.toString() ?? '') ??
+            DateTime.now(),
+      );
+}
 
 /// Top-level колбэк тапа по local-notification из фонового изолята.
 /// Должен быть top-level + `@pragma('vm:entry-point')`, иначе AOT-компилятор
@@ -308,6 +348,51 @@ class NotificationsService {
       ),
       payload: eventId,
     );
+
+    await _saveToHistory(data);
+  }
+
+  static Future<void> _saveToHistory(Map<String, String> data) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getStringList(_kHistoryPrefsKey) ?? [];
+      final item = NotificationHistoryItem(
+        eventId: data['event_id'] ?? '',
+        title: data['title'] ?? 'Тревога',
+        body: data['body'] ?? '',
+        threatType: data['threat_type'] ?? '',
+        receivedAt: DateTime.now(),
+      );
+      raw.insert(0, jsonEncode(item.toJson()));
+      if (raw.length > _kMaxHistory) {
+        raw.removeRange(_kMaxHistory, raw.length);
+      }
+      await prefs.setStringList(_kHistoryPrefsKey, raw);
+    } catch (e) {
+      debugPrint('[FCM] saveToHistory failed: $e');
+    }
+  }
+
+  /// Читает историю пуш-уведомлений из SharedPreferences (новые сверху).
+  Future<List<NotificationHistoryItem>> getHistory() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getStringList(_kHistoryPrefsKey) ?? [];
+      return raw
+          .map((s) {
+            try {
+              return NotificationHistoryItem.fromJson(
+                Map<String, dynamic>.from(jsonDecode(s) as Map),
+              );
+            } catch (_) {
+              return null;
+            }
+          })
+          .whereType<NotificationHistoryItem>()
+          .toList();
+    } catch (_) {
+      return [];
+    }
   }
 
   void _emitIfSensorAlert(Map<String, String> data) {

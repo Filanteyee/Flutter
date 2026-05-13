@@ -1,7 +1,24 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../services/api_client.dart';
 import '../widgets/create_request_sheet.dart';
+
+String buildPhotoUrl(String path) {
+  if (path.startsWith('http://') || path.startsWith('https://')) {
+    if (!kIsWeb) {
+      // localhost в URL от сервера заменяем на реальный хост из конфига,
+      // чтобы работало и на эмуляторе (10.0.2.2), и на физическом устройстве.
+      final serverHost = Uri.parse(ApiClient.baseHost).host;
+      return path
+          .replaceFirst('http://localhost:', 'http://$serverHost:')
+          .replaceFirst('https://localhost:', 'https://$serverHost:');
+    }
+    return path;
+  }
+  final host = ApiClient.baseHost;
+  return path.startsWith('/') ? '$host$path' : '$host/$path';
+}
 
 class ServiceRequestsPage extends StatefulWidget {
   const ServiceRequestsPage({super.key});
@@ -237,12 +254,16 @@ class _RequestCard extends StatelessWidget {
                   itemBuilder: (context, i) => ClipRRect(
                     borderRadius: BorderRadius.circular(14),
                     child: Image.network(
-                      request.photoPaths[i],
+                      buildPhotoUrl(request.photoPaths[i]),
+                      headers: ApiClient.instance.token != null
+                          ? {'Authorization': 'Bearer ${ApiClient.instance.token}'}
+                          : null,
                       width: 92, height: 92, fit: BoxFit.cover,
                       errorBuilder: (_, __, ___) => Container(
                         width: 92, height: 92,
+                        color: Colors.grey.shade200,
                         alignment: Alignment.center,
-                        child: const Icon(Icons.broken_image),
+                        child: const Icon(Icons.broken_image, color: Colors.grey),
                       ),
                     ),
                   ),

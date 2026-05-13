@@ -7,6 +7,8 @@ import 'package:flutter/foundation.dart';
 
 import 'api_client.dart';
 import 'notifications_service.dart';
+import 'sensor_service.dart';
+import 'sse_service.dart';
 
 class AppUser {
   final String id;
@@ -173,6 +175,10 @@ class AuthService {
     // Сначала снимаем FCM-токен с этого аккаунта на бэке, пока JWT ещё
     // валиден — иначе бэк продолжит слать пуши на старый токен.
     await NotificationsService.instance.deleteTokenOnBackend();
+    // Закрываем admin SSE-стрим, чтобы не таскал старый токен по фоновому
+    // backoff'у уже после logout.
+    SseService.instance.disconnect();
+    SensorService.instance.detachSse();
     await _api.clearSession();
     _currentUser = null;
     _controller.add(null);

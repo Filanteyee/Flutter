@@ -5,8 +5,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 class ApiClient {
   static String get baseUrl {
     if (kIsWeb) return 'http://localhost:8080/api/v1';
-    // На Android-эмуляторе 10.0.2.2 — это хост-машина
-    return 'http://10.0.2.2:8080/api/v1';
+    // На физическом устройстве — IP компьютера в локальной сети
+    // Для эмулятора замени обратно на: http://10.0.2.2:8080/api/v1
+    return 'http://192.168.1.84:8080/api/v1';
   }
 
   /// Хост сервера без префикса `/api/v1` — нужен, например, для статики

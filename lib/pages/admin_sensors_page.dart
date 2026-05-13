@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import '../models/sensor.dart';
 import '../services/sensor_service.dart';
 import '../widgets/sensor_widgets.dart';
+import 'admin_stats_page.dart';
+import 'sensor_event_detail_page.dart';
 
 class AdminSensorsPage extends StatefulWidget {
   /// Если задан — после загрузки откроется вкладка нужного подъезда и событие
@@ -28,7 +30,9 @@ class _AdminSensorsPageState extends State<AdminSensorsPage>
   List<Sensor> _sensors = [];
   List<SensorEvent> _events = [];
   StreamSubscription<List<SensorEvent>>? _eventsSub;
+  StreamSubscription<List<Sensor>>? _sensorsSub;
   bool _highlightConsumed = false;
+  bool _gridView = false;
 
   @override
   void initState() {
@@ -41,11 +45,16 @@ class _AdminSensorsPageState extends State<AdminSensorsPage>
         ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
       setState(() => _events = sorted);
     });
+    _sensorsSub = _service.sensorsStream.listen((sensors) {
+      if (!mounted) return;
+      setState(() => _sensors = sensors);
+    });
   }
 
   @override
   void dispose() {
     _eventsSub?.cancel();
+    _sensorsSub?.cancel();
     _tabs.dispose();
     super.dispose();
   }
@@ -103,29 +112,36 @@ class _AdminSensorsPageState extends State<AdminSensorsPage>
   SensorEvent? _activeEventForSensor(String sensorId) {
     for (final e in _events) {
       if (e.sensorId != sensorId) continue;
-      if (e.status == EventStatus.confirmed ||
-          e.status == EventStatus.falseAlarm) {
-        continue;
-      }
+      if (e.status == EventStatus.falseAlarm) continue;
       return e;
     }
     return null;
   }
 
+  bool _isMissing(Sensor s) => s.id.startsWith('missing-');
+
   Future<void> _openSensor(Sensor sensor) async {
+    if (_isMissing(sensor)) return;
     final event = _activeEventForSensor(sensor.id);
     if (event == null) {
+      final lastSeen = sensor.lastSeenAt ?? sensor.lastUpdated;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${sensor.type.label}: ${sensor.status.label}')),
+        SnackBar(
+          content: Text(
+            '${sensor.type.shortLabel}: ${sensor.status.label}, '
+            'виден ${formatSensorTime(lastSeen)}',
+          ),
+        ),
       );
       return;
     }
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (_) => _ManageEventSheet(event: event, sensor: sensor),
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SensorEventDetailPage(eventId: event.id),
+      ),
     );
+    if (!mounted) return;
     await _load();
   }
 
@@ -134,13 +150,35 @@ class _AdminSensorsPageState extends State<AdminSensorsPage>
     return Scaffold(
       appBar: AppBar(
         title: const Text('Датчики · администратор'),
-        bottom: TabBar(
-          controller: _tabs,
-          isScrollable: true,
-          tabs: [
-            for (int e = 1; e <= kEntrancesCount; e++) Tab(text: 'Подъезд $e'),
+        actions: [
+          if (!_loading && _error == null) ...[
+            IconButton(
+              icon: const Icon(Icons.bar_chart),
+              tooltip: 'Статистика',
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const AdminStatsPage(),
+                ),
+              ),
+            ),
+            IconButton(
+              icon: Icon(_gridView ? Icons.view_list : Icons.grid_view),
+              tooltip: _gridView ? 'Список' : 'Сетка',
+              onPressed: () => setState(() => _gridView = !_gridView),
+            ),
           ],
-        ),
+        ],
+        bottom: _gridView
+            ? null
+            : TabBar(
+                controller: _tabs,
+                isScrollable: true,
+                tabs: [
+                  for (int e = 1; e <= kEntrancesCount; e++)
+                    Tab(text: 'Подъезд $e'),
+                ],
+              ),
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
@@ -157,20 +195,26 @@ class _AdminSensorsPageState extends State<AdminSensorsPage>
                         offline: _offlineCount,
                       ),
                       Expanded(
-                        child: TabBarView(
-                          controller: _tabs,
-                          children: [
-                            for (int e = 1; e <= kEntrancesCount; e++)
-                              _EntranceTab(
-                                entrance: e,
-                                sensors: _sensors
-                                    .where((s) => s.entranceNum == e)
-                                    .toList(),
+                        child: _gridView
+                            ? _AdminSensorGrid(
+                                sensors: _sensors,
                                 events: _events,
                                 onSensorTap: _openSensor,
+                              )
+                            : TabBarView(
+                                controller: _tabs,
+                                children: [
+                                  for (int e = 1; e <= kEntrancesCount; e++)
+                                    _EntranceTab(
+                                      entrance: e,
+                                      sensors: _sensors
+                                          .where((s) => s.entranceNum == e)
+                                          .toList(),
+                                      events: _events,
+                                      onSensorTap: _openSensor,
+                                    ),
+                                ],
                               ),
-                          ],
-                        ),
                       ),
                     ],
                   ),
@@ -295,6 +339,13 @@ class _EntranceTab extends StatelessWidget {
     required this.onSensorTap,
   });
 
+  SensorEvent? _activeEventFor(String sensorId) {
+    for (final e in events) {
+      if (e.sensorId == sensorId && e.status != EventStatus.falseAlarm) return e;
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final maxFloor = sensors.fold<int>(0, (m, s) => s.floor > m ? s.floor : m);
@@ -333,6 +384,7 @@ class _EntranceTab extends StatelessWidget {
                     Expanded(
                       child: _AdminSensorTile(
                         sensor: water,
+                        activeEvent: _activeEventFor(water.id),
                         onTap: () => onSensorTap(water),
                       ),
                     ),
@@ -340,6 +392,7 @@ class _EntranceTab extends StatelessWidget {
                     Expanded(
                       child: _AdminSensorTile(
                         sensor: smoke,
+                        activeEvent: _activeEventFor(smoke.id),
                         onTap: () => onSensorTap(smoke),
                       ),
                     ),
@@ -368,13 +421,19 @@ class _EntranceTab extends StatelessWidget {
 class _AdminSensorTile extends StatelessWidget {
   final Sensor sensor;
   final VoidCallback onTap;
+  final SensorEvent? activeEvent;
 
-  const _AdminSensorTile({required this.sensor, required this.onTap});
+  const _AdminSensorTile({
+    required this.sensor,
+    required this.onTap,
+    this.activeEvent,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final color = sensorStatusColor(sensor.status);
-    final isAlert = sensor.status == SensorStatus.alert;
+    final color = effectiveSensorColor(sensor, activeEvent);
+    final isAlert = effectiveIsAlert(activeEvent);
+    final isMissing = sensor.id.startsWith('missing-');
 
     final tile = InkWell(
       borderRadius: BorderRadius.circular(14),
@@ -386,37 +445,54 @@ class _AdminSensorTile extends StatelessWidget {
           borderRadius: BorderRadius.circular(14),
           border: Border.all(color: color.withOpacity(0.5)),
         ),
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: color.withOpacity(0.18),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(sensorTypeIcon(sensor.type), color: color, size: 18),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    sensor.type.shortLabel,
-                    style: Theme.of(context).textTheme.bodyMedium,
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: color.withOpacity(0.18),
+                    shape: BoxShape.circle,
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    sensor.status.label,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: color,
-                          fontWeight: FontWeight.w700,
-                        ),
+                  child:
+                      Icon(sensorTypeIcon(sensor.type), color: color, size: 18),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        sensor.type.shortLabel,
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        effectiveStatusLabel(sensor, activeEvent),
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: color,
+                              fontWeight: FontWeight.w700,
+                            ),
+                      ),
+                    ],
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
+            if (isAlert && !isMissing) ...[
+              const SizedBox(height: 6),
+              Text(
+                'Нажмите для подробностей',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: color,
+                      fontSize: 11,
+                    ),
+              ),
+            ],
           ],
         ),
       ),
@@ -426,217 +502,158 @@ class _AdminSensorTile extends StatelessWidget {
   }
 }
 
-class _ManageEventSheet extends StatefulWidget {
-  final SensorEvent event;
-  final Sensor sensor;
+/// Компактная сетка всех 54 датчиков: 3 подъезда × 9 этажей × 2 иконки.
+class _AdminSensorGrid extends StatelessWidget {
+  final List<Sensor> sensors;
+  final List<SensorEvent> events;
+  final ValueChanged<Sensor> onSensorTap;
 
-  const _ManageEventSheet({required this.event, required this.sensor});
+  const _AdminSensorGrid({
+    required this.sensors,
+    required this.events,
+    required this.onSensorTap,
+  });
 
-  @override
-  State<_ManageEventSheet> createState() => _ManageEventSheetState();
-}
-
-class _ManageEventSheetState extends State<_ManageEventSheet> {
-  final SensorService _service = SensorService.instance;
-  final TextEditingController _commentCtrl = TextEditingController();
-
-  late EventStatus _status = widget.event.status;
-  late ThreatType _threatType = widget.event.threatType ??
-      (widget.event.type == SensorType.water
-          ? ThreatType.waterLeak
-          : ThreatType.fire);
-  bool _saving = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _commentCtrl.text = widget.event.adminComment ?? '';
-  }
-
-  @override
-  void dispose() {
-    _commentCtrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _save({required bool notify}) async {
-    if (_status == EventStatus.confirmed && _commentCtrl.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Добавьте комментарий для подтверждения')),
+  Sensor _missing(int entrance, int floor, SensorType type) => Sensor(
+        id: 'missing-$entrance-$floor-${type.apiValue}',
+        type: type,
+        entranceNum: entrance,
+        floor: floor,
+        status: SensorStatus.offline,
+        lastUpdated: DateTime.fromMillisecondsSinceEpoch(0),
       );
-      return;
+
+  Sensor _find(int entrance, int floor, SensorType type) =>
+      sensors.firstWhere(
+        (s) =>
+            s.entranceNum == entrance &&
+            s.floor == floor &&
+            s.type == type,
+        orElse: () => _missing(entrance, floor, type),
+      );
+
+  SensorEvent? _activeEventFor(String sensorId) {
+    for (final e in events) {
+      if (e.sensorId == sensorId && e.status != EventStatus.falseAlarm) return e;
     }
-
-    setState(() => _saving = true);
-    try {
-      await _service.updateEventStatus(
-        eventId: widget.event.id,
-        status: _status,
-        threatType: _status == EventStatus.confirmed ? _threatType : null,
-        adminComment: _status == EventStatus.confirmed
-            ? _commentCtrl.text.trim()
-            : null,
-      );
-      if (notify && _status == EventStatus.confirmed) {
-        await _service.notifyEntrance(eventId: widget.event.id);
-      }
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            _status == EventStatus.falseAlarm
-                ? 'Тревога закрыта'
-                : notify
-                    ? 'Статус обновлён, жильцы уведомлены'
-                    : 'Статус обновлён',
-          ),
-        ),
-      );
-      Navigator.of(context).pop();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка: $e')),
-      );
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
+    return null;
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final isConfirm = _status == EventStatus.confirmed;
-    final isFalse = _status == EventStatus.falseAlarm;
-    final viewInsets = MediaQuery.of(context).viewInsets.bottom;
-
+  Widget _cell(int entrance, int floor) {
+    final water = _find(entrance, floor, SensorType.water);
+    final smoke = _find(entrance, floor, SensorType.smoke);
     return Padding(
-      padding: EdgeInsets.fromLTRB(16, 0, 16, 16 + viewInsets),
-      child: SingleChildScrollView(
-        child: Column(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Center(
+        child: Row(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Управление событием',
-              style: Theme.of(context).textTheme.titleMedium,
+            _GridIcon(
+              sensor: water,
+              activeEvent: _activeEventFor(water.id),
+              onTap: () => onSensorTap(water),
             ),
-            const SizedBox(height: 12),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(14),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(sensorTypeIcon(widget.sensor.type),
-                            color: sensorStatusColor(widget.sensor.status)),
-                        const SizedBox(width: 8),
-                        Text(widget.sensor.type.label,
-                            style: Theme.of(context).textTheme.titleSmall),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Text('Подъезд ${widget.event.entranceNum} · этаж ${widget.event.floor}'),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Сработало ${formatSensorTime(widget.event.createdAt)}',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ],
-                ),
-              ),
+            const SizedBox(width: 4),
+            _GridIcon(
+              sensor: smoke,
+              activeEvent: _activeEventFor(smoke.id),
+              onTap: () => onSensorTap(smoke),
             ),
-            const SizedBox(height: 16),
-            Text('Статус', style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final s in EventStatus.values)
-                  ChoiceChip(
-                    label: Text(s.label),
-                    selected: _status == s,
-                    onSelected: _saving
-                        ? null
-                        : (_) => setState(() => _status = s),
-                  ),
-              ],
-            ),
-            if (isConfirm) ...[
-              const SizedBox(height: 16),
-              Text('Тип угрозы', style: Theme.of(context).textTheme.titleSmall),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: ChoiceChip(
-                      label: const Text('Затопление'),
-                      selected: _threatType == ThreatType.waterLeak,
-                      onSelected: _saving
-                          ? null
-                          : (_) => setState(
-                              () => _threatType = ThreatType.waterLeak),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: ChoiceChip(
-                      label: const Text('Пожар'),
-                      selected: _threatType == ThreatType.fire,
-                      onSelected: _saving
-                          ? null
-                          : (_) =>
-                              setState(() => _threatType = ThreatType.fire),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _commentCtrl,
-                minLines: 2,
-                maxLines: 4,
-                enabled: !_saving,
-                decoration: const InputDecoration(
-                  labelText: 'Комментарий',
-                  hintText: 'Что увидели, какие действия предприняты',
-                ),
-              ),
-            ],
-            const SizedBox(height: 16),
-            if (isConfirm)
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  onPressed: _saving ? null : () => _save(notify: true),
-                  icon: const Icon(Icons.notifications_active_outlined),
-                  label: Text(_saving
-                      ? 'Сохраняем...'
-                      : 'Подтвердить и уведомить жильцов'),
-                ),
-              )
-            else if (isFalse)
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.tonal(
-                  onPressed: _saving ? null : () => _save(notify: false),
-                  child: Text(_saving ? 'Сохраняем...' : 'Закрыть как ложную'),
-                ),
-              )
-            else
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  onPressed: _saving ? null : () => _save(notify: false),
-                  child: Text(_saving ? 'Сохраняем...' : 'Сохранить статус'),
-                ),
-              ),
           ],
         ),
       ),
     );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final labelStyle = Theme.of(context).textTheme.bodySmall?.copyWith(
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+          fontWeight: FontWeight.w600,
+        );
+
+    final rows = <TableRow>[
+      // Заголовок: П1 / П2 / П3
+      TableRow(
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: BorderSide(
+              color: Theme.of(context).dividerColor,
+            ),
+          ),
+        ),
+        children: [
+          const SizedBox(height: 32),
+          for (int e = 1; e <= kEntrancesCount; e++)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Center(child: Text('П$e', style: labelStyle)),
+            ),
+        ],
+      ),
+      // Этажи сверху вниз: 9 → 1
+      for (int floor = kFloorsPerEntrance; floor >= 1; floor--)
+        TableRow(
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Center(child: Text('$floor', style: labelStyle)),
+            ),
+            for (int e = 1; e <= kEntrancesCount; e++) _cell(e, floor),
+          ],
+        ),
+    ];
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
+      child: Table(
+        defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+        columnWidths: const {
+          0: FixedColumnWidth(30),
+          1: FlexColumnWidth(),
+          2: FlexColumnWidth(),
+          3: FlexColumnWidth(),
+        },
+        children: rows,
+      ),
+    );
+  }
+}
+
+/// Круглая иконка датчика в сетке. NORMAL=зелёная, ALERT=красная+пульс,
+/// OFFLINE=серая.
+class _GridIcon extends StatelessWidget {
+  final Sensor sensor;
+  final SensorEvent? activeEvent;
+  final VoidCallback onTap;
+
+  const _GridIcon({
+    required this.sensor,
+    required this.onTap,
+    this.activeEvent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = effectiveSensorColor(sensor, activeEvent);
+    final isAlert = effectiveIsAlert(activeEvent);
+
+    final icon = InkWell(
+      borderRadius: BorderRadius.circular(17),
+      onTap: onTap,
+      child: Container(
+        width: 34,
+        height: 34,
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.18),
+          shape: BoxShape.circle,
+        ),
+        alignment: Alignment.center,
+        child: Icon(sensorTypeIcon(sensor.type), color: color, size: 18),
+      ),
+    );
+
+    return PulsingAlert(active: isAlert, child: icon);
   }
 }
 
