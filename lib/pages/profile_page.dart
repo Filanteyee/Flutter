@@ -5,6 +5,7 @@ import '../services/auth_service.dart';
 import 'login_page.dart';
 import 'ownership_verification_page.dart';
 import 'register_flow_page.dart';
+import 'vehicles_page.dart';
 
 class ProfilePage extends StatefulWidget {
   const ProfilePage({super.key});
@@ -244,6 +245,16 @@ class _ProfilePageState extends State<ProfilePage> {
                         const SizedBox(height: 12),
                       ],
                       Card(child: Padding(padding: const EdgeInsets.all(16), child: Text(_roleDescription(role, verificationStatus)))),
+                      const SizedBox(height: 12),
+                      Card(
+                        child: ListTile(
+                          leading: const Icon(Icons.directions_car),
+                          title: const Text('Мои автомобили'),
+                          subtitle: const Text('Управление зарегистрированными авто'),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const VehiclesPage())),
+                        ),
+                      ),
                       const SizedBox(height: 16),
                       SizedBox(
                         width: double.infinity,

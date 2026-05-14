@@ -5,7 +5,10 @@ import 'package:flutter/material.dart';
 import '../models/sensor.dart';
 import '../services/api_client.dart';
 import '../services/auth_service.dart';
+import '../models/parking_spot.dart';
+import '../services/notification_center_service.dart';
 import '../services/notifications_service.dart';
+import '../services/parking_service.dart';
 import '../services/sensor_service.dart';
 import '../widgets/sensor_widgets.dart';
 import 'admin_sensors_page.dart';
@@ -13,11 +16,13 @@ import 'admin_verification_page.dart';
 import 'announcements_page.dart';
 import 'barrier_page.dart';
 import 'guests_page.dart';
-import 'payments_page.dart';
+import 'notifications_page.dart';
+import 'parking_page.dart';
 import 'profile_page.dart';
 import 'sensors_page.dart';
 import 'service_requests_page.dart';
 import 'services_page.dart';
+import 'vehicles_page.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -35,6 +40,8 @@ class _DashboardPageState extends State<DashboardPage>
   String _role = 'resident';
   bool _isLoggedIn = false;
   String _verificationStatus = 'not_submitted';
+  String? _userId;
+  int _unreadNotifications = 0;
 
   @override
   void initState() {
@@ -63,6 +70,7 @@ class _DashboardPageState extends State<DashboardPage>
           _role = 'resident';
           _isLoggedIn = false;
           _verificationStatus = 'not_submitted';
+          _userId = null;
           _loadingRole = false;
         });
         return;
@@ -71,14 +79,17 @@ class _DashboardPageState extends State<DashboardPage>
       final role = (res.data['role'] ?? 'resident').toString();
       final verification =
           (res.data['verification_status'] ?? 'not_submitted').toString();
+      final userId = res.data['id']?.toString();
       await _api.updateRole(role);
       if (!mounted) return;
       setState(() {
         _role = role;
+        _userId = userId;
         _isLoggedIn = true;
         _verificationStatus = verification;
         _loadingRole = false;
       });
+      if (role == 'admin') _loadUnreadCount();
       _consumePendingNotification();
     } catch (_) {
       if (!mounted) return;
@@ -86,9 +97,17 @@ class _DashboardPageState extends State<DashboardPage>
         _role = 'resident';
         _isLoggedIn = false;
         _verificationStatus = 'not_submitted';
+        _userId = null;
         _loadingRole = false;
       });
     }
+  }
+
+  Future<void> _loadUnreadCount() async {
+    try {
+      final count = await NotificationCenterService(ApiClient.instance).getUnreadCount();
+      if (mounted) setState(() => _unreadNotifications = count);
+    } catch (_) {}
   }
 
   void _consumePendingNotification() {
@@ -111,13 +130,16 @@ class _DashboardPageState extends State<DashboardPage>
   List<Widget> get _pages => [
     _HomeOverviewTab(
       role: _role,
+      userId: _userId,
       isLoggedIn: _isLoggedIn,
       verificationStatus: _verificationStatus,
       onRefresh: _loadRole,
+      unreadNotifications: _unreadNotifications,
+      onNotificationsRead: _loadUnreadCount,
     ),
     const ServiceRequestsPage(),
     const ServicesPage(),
-    const PaymentsPage(),
+    const ParkingPage(),
     const ProfilePage(),
   ];
 
@@ -135,8 +157,8 @@ class _DashboardPageState extends State<DashboardPage>
       label: 'Сервисы',
     ),
     BottomNavigationBarItem(
-      icon: Icon(Icons.receipt_long_outlined),
-      label: 'Платежи',
+      icon: Icon(Icons.local_parking),
+      label: 'Паркинг',
     ),
     BottomNavigationBarItem(
       icon: Icon(Icons.person_outline),
@@ -172,15 +194,21 @@ class _DashboardPageState extends State<DashboardPage>
 
 class _HomeOverviewTab extends StatelessWidget {
   final String role;
+  final String? userId;
   final bool isLoggedIn;
   final String verificationStatus;
   final Future<void> Function() onRefresh;
+  final int unreadNotifications;
+  final Future<void> Function() onNotificationsRead;
 
   const _HomeOverviewTab({
     required this.role,
+    this.userId,
     required this.isLoggedIn,
     required this.verificationStatus,
     required this.onRefresh,
+    this.unreadNotifications = 0,
+    required this.onNotificationsRead,
   });
 
   bool get _isAdmin => role == 'admin';
@@ -191,6 +219,44 @@ class _HomeOverviewTab extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         title: Text(_isAdmin ? 'Панель администратора' : 'Главная'),
+        actions: [
+          if (_isAdmin)
+            Stack(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.notifications_outlined),
+                  tooltip: 'Уведомления',
+                  onPressed: () async {
+                    await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const NotificationsPage(),
+                      ),
+                    );
+                    onNotificationsRead();
+                  },
+                ),
+                if (unreadNotifications > 0)
+                  Positioned(
+                    right: 8,
+                    top: 8,
+                    child: Container(
+                      padding: const EdgeInsets.all(2),
+                      decoration: BoxDecoration(
+                        color: Colors.red,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                      child: Text(
+                        unreadNotifications > 99 ? '99+' : '$unreadNotifications',
+                        style: const TextStyle(color: Colors.white, fontSize: 10),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+        ],
       ),
       body: SafeArea(
       child: RefreshIndicator(
@@ -245,6 +311,8 @@ class _HomeOverviewTab extends StatelessWidget {
             const SizedBox(height: 14),
             const _SensorsStatusCard(mode: _SensorsCardMode.admin),
             const SizedBox(height: 14),
+            const _ParkingStatusCard(mode: _ParkingCardMode.admin),
+            const SizedBox(height: 14),
             _ActionGrid(
               children: [
                 _ActionCard(
@@ -295,6 +363,19 @@ class _HomeOverviewTab extends StatelessWidget {
                       context,
                       MaterialPageRoute(
                         builder: (_) => const AnnouncementsPage(),
+                      ),
+                    );
+                  },
+                ),
+                _ActionCard(
+                  title: 'Паркинг',
+                  subtitle: 'Места, брони и IoT-события',
+                  icon: Icons.local_parking,
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const ParkingPage(),
                       ),
                     );
                   },
@@ -360,6 +441,15 @@ class _HomeOverviewTab extends StatelessWidget {
                       : _SensorsCardMode.unverified,
             ),
             const SizedBox(height: 14),
+            _ParkingStatusCard(
+              mode: !isLoggedIn
+                  ? _ParkingCardMode.guest
+                  : _isApprovedResident
+                      ? _ParkingCardMode.resident
+                      : _ParkingCardMode.unverified,
+              userId: userId,
+            ),
+            const SizedBox(height: 14),
             _ActionGrid(
               children: [
                 _ActionCard(
@@ -390,13 +480,26 @@ class _HomeOverviewTab extends StatelessWidget {
                 ),
                 _ActionCard(
                   title: 'Шлагбаум',
-                  subtitle: 'Открыть въезд и посмотреть историю',
+                  subtitle: 'История въездов и выездов',
                   icon: Icons.garage_outlined,
                   onTap: () {
                     Navigator.push(
                       context,
                       MaterialPageRoute(
                         builder: (_) => const BarrierPage(),
+                      ),
+                    );
+                  },
+                ),
+                _ActionCard(
+                  title: 'Мои автомобили',
+                  subtitle: 'Управление зарегистрированными авто',
+                  icon: Icons.directions_car_outlined,
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const VehiclesPage(),
                       ),
                     );
                   },
@@ -448,7 +551,8 @@ class _TopActionButton extends StatelessWidget {
     );
 
     return SizedBox(
-      height: 64,
+      height: 80,
+      width: double.infinity,
       child: button,
     );
   }
@@ -749,5 +853,240 @@ class _ActionCard extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+// ──────────────────────────────────────────────
+// Parking status card
+// ──────────────────────────────────────────────
+
+enum _ParkingCardMode { admin, resident, unverified, guest }
+
+class _ParkingStatusCard extends StatefulWidget {
+  final _ParkingCardMode mode;
+  final String? userId;
+
+  const _ParkingStatusCard({required this.mode, this.userId});
+
+  @override
+  State<_ParkingStatusCard> createState() => _ParkingStatusCardState();
+}
+
+class _ParkingStatusCardState extends State<_ParkingStatusCard> {
+  bool _loading = true;
+  List<ParkingSpot> _spots = [];
+  StreamSubscription<List<ParkingSpot>>? _sub;
+
+  bool get _interactive =>
+      widget.mode == _ParkingCardMode.admin ||
+      widget.mode == _ParkingCardMode.resident;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_interactive) {
+      _load();
+      _sub = ParkingService.instance.spotsStream.listen((spots) {
+        if (!mounted) return;
+        setState(() => _spots = spots);
+      });
+    } else {
+      _loading = false;
+    }
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ParkingStatusCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.mode != widget.mode || oldWidget.userId != widget.userId) {
+      if (_interactive) {
+        setState(() => _loading = true);
+        _load();
+      } else {
+        setState(() {
+          _loading = false;
+          _spots = [];
+        });
+      }
+    }
+  }
+
+  Future<void> _load() async {
+    try {
+      final spots = await ParkingService.instance.getSpots();
+      if (!mounted) return;
+      setState(() {
+        _spots = spots;
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+    }
+  }
+
+  ParkingSpot? get _myPermanentSpot =>
+      widget.mode == _ParkingCardMode.resident && widget.userId != null
+          ? _spots
+              .where((s) =>
+                  s.type == ParkingSpotType.permanent &&
+                  s.assignedUserId == widget.userId)
+              .firstOrNull
+          : null;
+
+  int get _freeGuestCount => _spots
+      .where((s) =>
+          s.type == ParkingSpotType.guest &&
+          s.status == ParkingSpotStatus.free)
+      .length;
+
+  int get _freeTotal =>
+      _spots.where((s) => s.status == ParkingSpotStatus.free).length;
+
+  void _open() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const ParkingPage()),
+    ).then((_) => _load());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final disabled = !_interactive;
+
+    Color color;
+    IconData icon;
+    String title;
+    String subtitle;
+    bool pulsing = false;
+
+    if (widget.mode == _ParkingCardMode.guest) {
+      color = Colors.grey;
+      icon = Icons.lock_outline;
+      title = 'Доступно после входа';
+      subtitle = 'Войдите, чтобы видеть состояние парковки';
+    } else if (widget.mode == _ParkingCardMode.unverified) {
+      color = Colors.grey;
+      icon = Icons.verified_user_outlined;
+      title = 'Подтвердите статус';
+      subtitle = 'После проверки документов откроется доступ';
+    } else if (widget.mode == _ParkingCardMode.admin) {
+      if (_loading || _spots.isEmpty) {
+        color = Colors.grey;
+        icon = Icons.local_parking;
+        title = _loading ? 'Загрузка...' : 'Нет данных';
+        subtitle = 'Парковочные места';
+      } else {
+        final free = _freeTotal;
+        final total = _spots.length;
+        final occupied = total - free;
+        color = occupied == 0 ? Colors.green : Colors.orange;
+        icon = Icons.local_parking;
+        title = '$free из $total свободно';
+        subtitle = occupied == 0 ? 'Все места свободны' : '$occupied занято';
+      }
+    } else {
+      // resident
+      final spot = _myPermanentSpot;
+      if (_loading) {
+        color = Colors.grey;
+        icon = Icons.local_parking;
+        title = 'Загрузка...';
+        subtitle = 'Парковочные места';
+      } else if (spot != null) {
+        final occupied = spot.status == ParkingSpotStatus.occupied;
+        color = occupied ? Colors.red : Colors.green;
+        icon = occupied ? Icons.warning_amber_rounded : Icons.local_parking;
+        title = occupied
+            ? 'Ваше место занято!'
+            : 'Место №${spot.spotNumber} свободно';
+        subtitle = occupied
+            ? 'Постоянное место №${spot.spotNumber}'
+            : 'Ваше постоянное место';
+        pulsing = occupied;
+      } else {
+        final free = _freeGuestCount;
+        color = free > 0 ? Colors.green : Colors.orange;
+        icon = Icons.local_parking;
+        title = free > 0 ? '$free гостевых мест свободно' : 'Нет свободных мест';
+        subtitle = 'Гостевая парковка';
+      }
+    }
+
+    final canTap = _interactive && !_loading;
+
+    final card = Card(
+      child: Opacity(
+        opacity: disabled ? 0.65 : 1.0,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(22),
+          onTap: canTap ? _open : null,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: color.withOpacity(0.18),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(icon, color: color, size: 24),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text(
+                            'Парковка',
+                            style: Theme.of(context).textTheme.titleSmall,
+                          ),
+                          const SizedBox(width: 8),
+                          if (_loading)
+                            const SizedBox(
+                              width: 12,
+                              height: 12,
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        title,
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                              color: color,
+                              fontWeight: FontWeight.w700,
+                            ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(
+                  canTap ? Icons.chevron_right : Icons.lock_outline,
+                  color: canTap ? null : Colors.grey,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    return PulsingAlert(active: pulsing, child: card);
   }
 }
