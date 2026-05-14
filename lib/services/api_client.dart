@@ -3,11 +3,11 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiClient {
+  static const _host = String.fromEnvironment('SERVER_HOST', defaultValue: '192.168.1.64');
+
   static String get baseUrl {
     if (kIsWeb) return 'http://localhost:8080/api/v1';
-    // На физическом устройстве — IP компьютера в локальной сети
-    // Для эмулятора замени обратно на: http://10.0.2.2:8080/api/v1
-    return 'http://192.168.1.84:8080/api/v1';
+    return 'http://$_host:8080/api/v1';
   }
 
   /// Хост сервера без префикса `/api/v1` — нужен, например, для статики
@@ -83,6 +83,8 @@ class ApiClient {
 
   Future<Response> patch(String path, {dynamic data}) =>
       _dio.patch(path, data: data);
+
+  Future<Response> delete(String path) => _dio.delete(path);
 
   Future<Response> postForm(String path, FormData data) =>
       _dio.post(path, data: data);

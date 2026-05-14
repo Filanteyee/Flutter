@@ -7,7 +7,10 @@ import 'package:flutter_pdfview/flutter_pdfview.dart';
 import 'package:open_file/open_file.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../models/parking_permit.dart';
 import '../services/api_client.dart';
+import '../services/parking_service.dart';
+import '../utils/error_helper.dart';
 
 class AdminVerificationPage extends StatefulWidget {
   const AdminVerificationPage({super.key});
@@ -285,15 +288,6 @@ class _AdminVerificationPageState extends State<AdminVerificationPage> {
     }
   }
 
-  String _statusLabel(String status) => switch (status) { 'pending' => 'На проверке', 'approved' => 'Подтверждено', 'rejected' => 'Отклонено', _ => status };
-  Color _statusColor(String status) => switch (status) { 'approved' => Colors.green, 'rejected' => Colors.red, _ => Colors.orange };
-  String _roleLabel(String role) => switch (role) { 'owner' => 'Владелец', 'tenant' => 'Арендатор', _ => role };
-
-  String _formatDate(DateTime dt) {
-    String two(int n) => n.toString().padLeft(2, '0');
-    return '${two(dt.day)}.${two(dt.month)}.${dt.year}  ${two(dt.hour)}:${two(dt.minute)}';
-  }
-
   String _formatFileSize(int size) {
     if (size < 1024) return '$size B';
     if (size < 1024 * 1024) return '${(size / 1024).toStringAsFixed(1)} KB';
@@ -302,23 +296,72 @@ class _AdminVerificationPageState extends State<AdminVerificationPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Проверка документов')),
-      body: SafeArea(
-        child: _loading
-            ? const Center(child: CircularProgressIndicator())
-            : _error != null
-            ? _ErrorBlock(message: _error!, onRetry: _loadRequests)
-            : _requests.isEmpty
-            ? const _EmptyBlock(text: 'Запросов на подтверждение пока нет')
-            : RefreshIndicator(
-          onRefresh: _loadRequests,
-          child: ListView.separated(
-            padding: const EdgeInsets.all(16),
-            itemCount: _requests.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 12),
-            itemBuilder: (context, index) {
-              final request = _requests[index];
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Проверка документов'),
+          bottom: const TabBar(
+            tabs: [
+              Tab(text: 'Верификация'),
+              Tab(text: 'Пропуска паркинга'),
+            ],
+          ),
+        ),
+        body: TabBarView(
+          children: [
+            _VerificationTab(
+              loading: _loading,
+              error: _error,
+              requests: _requests,
+              onRefresh: _loadRequests,
+              onUpdateStatus: _updateStatus,
+              onOpenDocuments: _openDocumentsDialog,
+            ),
+            const _PermitsTab(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Вкладка "Верификация" ───────────────────────────────────
+
+class _VerificationTab extends StatelessWidget {
+  final bool loading;
+  final String? error;
+  final List<_VerificationRequestItem> requests;
+  final Future<void> Function() onRefresh;
+  final Future<void> Function(_VerificationRequestItem, String) onUpdateStatus;
+  final Future<void> Function(_VerificationRequestItem) onOpenDocuments;
+
+  const _VerificationTab({
+    required this.loading,
+    required this.error,
+    required this.requests,
+    required this.onRefresh,
+    required this.onUpdateStatus,
+    required this.onOpenDocuments,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: loading
+          ? const Center(child: CircularProgressIndicator())
+          : error != null
+          ? _ErrorBlock(message: error!, onRetry: onRefresh)
+          : requests.isEmpty
+          ? const _EmptyBlock(text: 'Запросов на подтверждение пока нет')
+          : RefreshIndicator(
+        onRefresh: onRefresh,
+        child: ListView.separated(
+          padding: const EdgeInsets.all(16),
+          itemCount: requests.length,
+          separatorBuilder: (_, __) => const SizedBox(height: 12),
+          itemBuilder: (context, index) {
+              final request = requests[index];
               final profile = request.profile;
 
               return Card(
@@ -330,7 +373,7 @@ class _AdminVerificationPageState extends State<AdminVerificationPage> {
                       Row(
                         children: [
                           Expanded(child: Text(profile.fullName.isEmpty ? 'Без имени' : profile.fullName, style: Theme.of(context).textTheme.titleMedium)),
-                          Chip(label: Text(_statusLabel(request.status)), avatar: Icon(Icons.circle, size: 10, color: _statusColor(request.status))),
+                          Chip(label: Text(_verStatusLabel(request.status)), avatar: Icon(Icons.circle, size: 10, color: _verStatusColor(request.status))),
                         ],
                       ),
                       const SizedBox(height: 6),
@@ -339,9 +382,9 @@ class _AdminVerificationPageState extends State<AdminVerificationPage> {
                       if (profile.iin.isNotEmpty) ...[const SizedBox(height: 4), Text('ИИН: ${profile.iin}')],
                       if (profile.fullAddress.isNotEmpty) ...[const SizedBox(height: 4), Text(profile.fullAddress, style: Theme.of(context).textTheme.bodySmall)],
                       const SizedBox(height: 12),
-                      Row(children: [const Icon(Icons.badge_outlined, size: 18), const SizedBox(width: 8), Text('Запрошенный статус: ${_roleLabel(request.requestedRole)}')]),
+                      Row(children: [const Icon(Icons.badge_outlined, size: 18), const SizedBox(width: 8), Text('Запрошенный статус: ${_verRoleLabel(request.requestedRole)}')]),
                       const SizedBox(height: 8),
-                      Row(children: [const Icon(Icons.schedule_outlined, size: 18), const SizedBox(width: 8), Text(_formatDate(request.createdAt))]),
+                      Row(children: [const Icon(Icons.schedule_outlined, size: 18), const SizedBox(width: 8), Text(_verFormatDate(request.createdAt))]),
                       if (request.comment.isNotEmpty) ...[
                         const SizedBox(height: 12),
                         Container(
@@ -358,7 +401,7 @@ class _AdminVerificationPageState extends State<AdminVerificationPage> {
                       SizedBox(
                         width: double.infinity,
                         child: OutlinedButton.icon(
-                          onPressed: () => _openDocumentsDialog(request),
+                          onPressed: () => onOpenDocuments(request),
                           icon: const Icon(Icons.folder_open_outlined),
                           label: Text('Документы (${request.documents.length})'),
                         ),
@@ -367,9 +410,9 @@ class _AdminVerificationPageState extends State<AdminVerificationPage> {
                       if (request.status == 'pending')
                         Row(
                           children: [
-                            Expanded(child: OutlinedButton(onPressed: () => _updateStatus(request, 'rejected'), child: const Text('Отклонить'))),
+                            Expanded(child: OutlinedButton(onPressed: () => onUpdateStatus(request, 'rejected'), child: const Text('Отклонить'))),
                             const SizedBox(width: 12),
-                            Expanded(child: FilledButton(onPressed: () => _updateStatus(request, 'approved'), child: const Text('Подтвердить'))),
+                            Expanded(child: FilledButton(onPressed: () => onUpdateStatus(request, 'approved'), child: const Text('Подтвердить'))),
                           ],
                         )
                       else
@@ -387,7 +430,6 @@ class _AdminVerificationPageState extends State<AdminVerificationPage> {
             },
           ),
         ),
-      ),
     );
   }
 }
@@ -549,6 +591,229 @@ class _PdfViewerPageState extends State<_PdfViewerPage> {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+// ─── Top-level helpers ───────────────────────────────────────
+
+String _verStatusLabel(String s) => switch (s) {
+  'pending' => 'На проверке', 'approved' => 'Подтверждено', 'rejected' => 'Отклонено', _ => s
+};
+Color _verStatusColor(String s) => switch (s) {
+  'approved' => Colors.green, 'rejected' => Colors.red, _ => Colors.orange
+};
+String _verRoleLabel(String r) => switch (r) {
+  'owner' => 'Владелец', 'tenant' => 'Арендатор', _ => r
+};
+String _verFormatDate(DateTime dt) {
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${two(dt.day)}.${two(dt.month)}.${dt.year}  ${two(dt.hour)}:${two(dt.minute)}';
+}
+
+// ─── Вкладка "Пропуска паркинга" ────────────────────────────
+
+class _PermitsTab extends StatefulWidget {
+  const _PermitsTab();
+  @override
+  State<_PermitsTab> createState() => _PermitsTabState();
+}
+
+class _PermitsTabState extends State<_PermitsTab> {
+  bool _loading = true;
+  List<ParkingPermit> _permits = [];
+  String? _error;
+  String _filter = 'all';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      setState(() { _loading = true; _error = null; });
+      final permits = await ParkingService.instance
+          .getAdminPermits(status: _filter == 'all' ? null : _filter);
+      if (!mounted) return;
+      setState(() { _permits = permits; _loading = false; });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() { _error = friendlyError(e); _loading = false; });
+    }
+  }
+
+  Future<void> _review(ParkingPermit permit, String status) async {
+    String? comment;
+    if (status == 'rejected') {
+      final ctrl = TextEditingController();
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Причина отклонения'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: TextField(
+                controller: ctrl,
+                decoration: const InputDecoration(
+                  hintText: 'Необязательно',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Отклонить')),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+      comment = ctrl.text.trim().isEmpty ? null : ctrl.text.trim();
+    }
+    try {
+      await ParkingService.instance.adminReviewPermit(permit.id, status, adminComment: comment);
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(friendlyError(e))));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+          child: SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: 'all', label: Text('Все')),
+              ButtonSegment(value: 'pending', label: Text('Ожидают')),
+              ButtonSegment(value: 'approved', label: Text('Одобрены')),
+              ButtonSegment(value: 'rejected', label: Text('Отклонены')),
+            ],
+            selected: {_filter},
+            onSelectionChanged: (val) {
+              setState(() => _filter = val.first);
+              _load();
+            },
+            style: const ButtonStyle(visualDensity: VisualDensity.compact),
+          ),
+        ),
+        Expanded(
+          child: _loading
+              ? const Center(child: CircularProgressIndicator())
+              : _error != null
+                  ? Center(child: Text(_error!))
+                  : _permits.isEmpty
+                      ? const Center(child: Text('Нет заявок'))
+                      : RefreshIndicator(
+                          onRefresh: _load,
+                          child: ListView.builder(
+                            padding: const EdgeInsets.all(12),
+                            itemCount: _permits.length,
+                            itemBuilder: (_, i) {
+                              final p = _permits[i];
+                              return _PermitCard(
+                                permit: p,
+                                onApprove: p.isPending ? () => _review(p, 'approved') : null,
+                                onReject:  p.isPending ? () => _review(p, 'rejected') : null,
+                              );
+                            },
+                          ),
+                        ),
+        ),
+      ],
+    );
+  }
+}
+
+class _PermitCard extends StatelessWidget {
+  final ParkingPermit permit;
+  final VoidCallback? onApprove;
+  final VoidCallback? onReject;
+
+  const _PermitCard({required this.permit, this.onApprove, this.onReject});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = permit;
+    final color = p.isApproved ? Colors.green : p.isRejected ? Colors.red : Colors.orange;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(child: Text(p.fullNameOrEmpty.isNotEmpty ? p.fullNameOrEmpty : 'Житель',
+                    style: const TextStyle(fontWeight: FontWeight.bold))),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(p.statusLabel,
+                      style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                const Icon(Icons.directions_car_outlined, size: 16, color: Colors.black54),
+                const SizedBox(width: 4),
+                Text(p.plateNumber, style: const TextStyle(fontWeight: FontWeight.w600)),
+                if (p.spotNumber != null) ...[
+                  const SizedBox(width: 12),
+                  const Icon(Icons.local_parking, size: 16, color: Colors.black54),
+                  const SizedBox(width: 4),
+                  Text(p.spotNumber!),
+                ],
+              ],
+            ),
+            if (p.documentUrl != null) ...[
+              const SizedBox(height: 4),
+              const Row(children: [
+                Icon(Icons.attach_file, size: 14, color: Colors.black45),
+                SizedBox(width: 4),
+                Text('Документ прикреплён', style: TextStyle(fontSize: 12, color: Colors.black45)),
+              ]),
+            ],
+            if (p.adminComment != null && p.adminComment!.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text('Комментарий: ${p.adminComment}',
+                  style: const TextStyle(fontSize: 12, color: Colors.black54)),
+            ],
+            if (onApprove != null || onReject != null) ...[
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  if (onApprove != null)
+                    Expanded(child: FilledButton(
+                      onPressed: onApprove,
+                      style: FilledButton.styleFrom(backgroundColor: Colors.green),
+                      child: const Text('Одобрить'),
+                    )),
+                  if (onApprove != null && onReject != null) const SizedBox(width: 8),
+                  if (onReject != null)
+                    Expanded(child: OutlinedButton(
+                      onPressed: onReject,
+                      style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
+                      child: const Text('Отклонить'),
+                    )),
+                ],
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }

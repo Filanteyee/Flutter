@@ -11,6 +11,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../firebase_options.dart';
 import 'api_client.dart';
+import 'barrier_service.dart';
+import 'parking_service.dart';
 import 'sensor_service.dart';
 
 /// Ключ в SharedPreferences для payload-а, по которому пользователь
@@ -82,18 +84,15 @@ void _onLocalNotificationBgTap(NotificationResponse response) async {
 /// `@pragma('vm:entry-point')`, иначе AOT-компилятор его выкинет и Flutter
 /// Engine не сможет вызвать его в отдельном изоляте.
 @pragma('vm:entry-point')
-Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
-  // В фоне у нас новый изолят — нужно поднять Firebase заново.
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
+Future<void> firebaseBackgroundHandler(RemoteMessage message) async {
+  try {
+    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  } catch (_) {}
   debugPrint('[FCM-bg] got message: ${message.data}');
-  // FlutterLocalNotificationsPlugin тоже надо проинициализировать в новом
-  // изоляте — main-изолят сюда не дотягивается. Без этого `show()` тихо
-  // ничего не делает, и пользователь не видит баннер.
+  if (message.notification != null) {
+    return;
+  }
   await NotificationsService._ensureLocalNotificationsInited();
-  // Бэк шлёт data-only сообщения, поэтому Android системный баннер сам
-  // не нарисует — рисуем руками через flutter_local_notifications.
   await NotificationsService._showFromData(message.data);
 }
 
@@ -101,19 +100,31 @@ class NotificationsService {
   NotificationsService._();
   static final NotificationsService instance = NotificationsService._();
 
-  static const _channelId = 'sensor_alerts';
+  static const _channelId = 'sensor_alerts_v2';
   static const _channelName = 'Тревоги датчиков';
   static const _channelDescription =
       'Push-уведомления о срабатывании датчиков воды и дыма';
+
+  static const _barrierChannelId = 'barrier_events_v2';
+  static const _barrierChannelName = 'Шлагбаум';
+  static const _barrierChannelDescription = 'Уведомления о въезде гостей и неизвестных ТС';
+
+  static const _parkingChannelId = 'parking_events_v2';
+  static const _parkingChannelName = 'Парковка';
+  static const _parkingChannelDescription =
+      'Уведомления о парковочных местах';
 
   static final FlutterLocalNotificationsPlugin _local =
       FlutterLocalNotificationsPlugin();
 
   final _eventController = StreamController<Map<String, String>>.broadcast();
+  final _inAppController = StreamController<({String title, String body})>.broadcast();
 
   /// Поток FCM-пэйлоадов, по которым UI должен перезапросить события.
-  /// Каждый элемент — `data` из `RemoteMessage` (всё в строках).
   Stream<Map<String, String>> get sensorAlerts => _eventController.stream;
+
+  /// Поток для показа уведомлений внутри открытого приложения.
+  Stream<({String title, String body})> get inAppNotifications => _inAppController.stream;
 
   /// Тап по пушу — данные сообщения, по которому пользователь открыл приложение.
   /// Нужен для навигации в нужный экран после холодного запуска / из бэкграунда.
@@ -137,18 +148,13 @@ class NotificationsService {
     await _local.initialize(
       const InitializationSettings(
         android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+        iOS: DarwinInitializationSettings(),
       ),
       onDidReceiveNotificationResponse: (response) {
-        // Тап по локальной нотификации в foreground.
-        // payload содержит event_id, чтобы UI мог подсветить событие.
         final payload = response.payload;
-        debugPrint('[FCM] local tap (fg): event_id=$payload');
-        if (payload != null && payload.isNotEmpty) {
-          _pendingOpenedMessage = {
-            'kind': 'sensor_alert',
-            'event_id': payload,
-          };
-        }
+        debugPrint('[FCM] local tap (fg): payload=$payload');
+        if (payload == null || payload.isEmpty) return;
+        _pendingOpenedMessage = _payloadToMessage(payload);
       },
       onDidReceiveBackgroundNotificationResponse: _onLocalNotificationBgTap,
     );
@@ -159,11 +165,8 @@ class NotificationsService {
       final prefs = await SharedPreferences.getInstance();
       final pendingTap = prefs.getString(_kPendingTapPrefsKey);
       if (pendingTap != null && pendingTap.isNotEmpty) {
-        debugPrint('[FCM] resumed from bg local tap: event_id=$pendingTap');
-        _pendingOpenedMessage = {
-          'kind': 'sensor_alert',
-          'event_id': pendingTap,
-        };
+        debugPrint('[FCM] resumed from bg local tap: payload=$pendingTap');
+        _pendingOpenedMessage = _payloadToMessage(pendingTap);
         await prefs.remove(_kPendingTapPrefsKey);
       }
     } catch (e) {
@@ -180,10 +183,34 @@ class NotificationsService {
         importance: Importance.high,
       ),
     );
+    await androidImpl?.createNotificationChannel(
+      const AndroidNotificationChannel(
+        _barrierChannelId,
+        _barrierChannelName,
+        description: _barrierChannelDescription,
+        importance: Importance.high,
+      ),
+    );
+    await androidImpl?.createNotificationChannel(
+      const AndroidNotificationChannel(
+        _parkingChannelId,
+        _parkingChannelName,
+        description: _parkingChannelDescription,
+        importance: Importance.high,
+      ),
+    );
 
-    // 2) Permission на Android 13+ / iOS.
+    // 2) Permission для flutter_local_notifications на Android 13+
+    await androidImpl?.requestNotificationsPermission();
+
+    // 3) Permission на Android 13+ / iOS.
     final messaging = FirebaseMessaging.instance;
     final settings = await messaging.requestPermission(
+      alert: true,
+      badge: true,
+      sound: true,
+    );
+    await messaging.setForegroundNotificationPresentationOptions(
       alert: true,
       badge: true,
       sound: true,
@@ -192,14 +219,13 @@ class NotificationsService {
       '[FCM] permission: ${settings.authorizationStatus}',
     );
 
-    // 3) Background handler регистрируется один раз на процесс.
-    FirebaseMessaging.onBackgroundMessage(_firebaseBackgroundHandler);
-
-    // 4) Foreground listener.
+    // 3) Foreground listener.
     FirebaseMessaging.onMessage.listen((RemoteMessage msg) async {
       final data = _stringMap(msg.data);
       debugPrint('[FCM] onMessage: $data');
-      await _showFromData(data);
+      if (!_isAndroidNativeForegroundKind(data['kind'])) {
+        await _showFromData(data);
+      }
       _emitIfSensorAlert(data);
     });
 
@@ -307,6 +333,7 @@ class NotificationsService {
     await _local.initialize(
       const InitializationSettings(
         android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+        iOS: DarwinInitializationSettings(),
       ),
     );
     final androidImpl = _local.resolvePlatformSpecificImplementation<
@@ -319,37 +346,194 @@ class NotificationsService {
         importance: Importance.high,
       ),
     );
+    await androidImpl?.createNotificationChannel(
+      const AndroidNotificationChannel(
+        _barrierChannelId,
+        _barrierChannelName,
+        description: _barrierChannelDescription,
+        importance: Importance.high,
+      ),
+    );
+    await androidImpl?.createNotificationChannel(
+      const AndroidNotificationChannel(
+        _parkingChannelId,
+        _parkingChannelName,
+        description: _parkingChannelDescription,
+        importance: Importance.high,
+      ),
+    );
   }
 
   static Future<void> _showFromData(Map<String, dynamic> raw) async {
     final data = _stringMap(raw);
-    if (data['kind'] != 'sensor_alert') return;
-    final title = data['title'] ?? 'Тревога';
-    final body = data['body'] ?? '';
-    final eventId = data['event_id'] ?? '';
+    final kind = data['kind'] ?? '';
 
-    // ID нотификации — стабильный hash event_id. Если для одного события
-    // придёт несколько обновлений, новая заменит старую.
-    final notifId = eventId.hashCode & 0x7fffffff;
-
-    await _local.show(
-      notifId,
-      title,
-      body,
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          _channelId,
-          _channelName,
-          channelDescription: _channelDescription,
-          importance: Importance.high,
-          priority: Priority.high,
-          category: AndroidNotificationCategory.alarm,
+    if (kind == 'sensor_alert') {
+      final title = data['title'] ?? 'Тревога';
+      final body = data['body'] ?? '';
+      final eventId = data['event_id'] ?? '';
+      final notifId = eventId.hashCode & 0x7fffffff;
+      await _local.show(
+        notifId,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _channelId,
+            _channelName,
+            channelDescription: _channelDescription,
+            importance: Importance.high,
+            priority: Priority.high,
+            category: AndroidNotificationCategory.alarm,
+            visibility: NotificationVisibility.public,
+            playSound: true,
+            enableVibration: true,
+            ticker: 'Sensor alert',
+          ),
+          iOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          ),
         ),
-      ),
-      payload: eventId,
-    );
+        payload: eventId,
+      );
 
-    await _saveToHistory(data);
+      await _saveToHistory(data);
+      return;
+    }
+
+    if (kind == 'unknown_vehicle') {
+      final plate = data['plate_number'] ?? '';
+      final eventId = data['event_id'] ?? '';
+      final title = data['title'] ?? 'Неизвестный автомобиль';
+      final body = data['body'] ??
+          (plate.isNotEmpty ? 'Номер: $plate — требуется решение' : 'Требуется решение');
+      final notifId = eventId.hashCode & 0x7fffffff;
+      await _local.show(
+        notifId,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _barrierChannelId,
+            _barrierChannelName,
+            channelDescription: _barrierChannelDescription,
+            importance: Importance.high,
+            priority: Priority.high,
+            visibility: NotificationVisibility.public,
+            playSound: true,
+            enableVibration: true,
+            ticker: 'Unknown vehicle',
+          ),
+          iOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          ),
+        ),
+        payload: 'unknown_vehicle:$eventId',
+      );
+      return;
+    }
+
+    if (kind == 'guest_arrived') {
+      final guestName = data['guest_name'] ?? 'Гость';
+      final title = data['title'] ?? 'Гость въехал';
+      final body = data['body'] ?? '$guestName прибыл на территорию ЖК';
+      final notifId = DateTime.now().millisecondsSinceEpoch & 0x7fffffff;
+      await _local.show(
+        notifId,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _barrierChannelId,
+            _barrierChannelName,
+            channelDescription: _barrierChannelDescription,
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
+          iOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          ),
+        ),
+        payload: 'guest_arrived:',
+      );
+      return;
+    }
+
+    if (kind == 'parking_alert') {
+      final spotNumber = data['spot_number'] ?? '';
+      final spotId = data['spot_id'] ?? '';
+      final title = data['title'] ?? 'Тревога парковки';
+      final body = data['body'] ??
+          (spotNumber.isNotEmpty
+              ? 'Место №$spotNumber занято'
+              : 'Парковочное место занято');
+      final notifId = spotId.isNotEmpty
+          ? spotId.hashCode & 0x7fffffff
+          : DateTime.now().millisecondsSinceEpoch & 0x7fffffff;
+      await _local.show(
+        notifId,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _parkingChannelId,
+            _parkingChannelName,
+            channelDescription: _parkingChannelDescription,
+            importance: Importance.high,
+            priority: Priority.high,
+            visibility: NotificationVisibility.public,
+            playSound: true,
+            enableVibration: true,
+            ticker: 'Parking alert',
+          ),
+          iOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          ),
+        ),
+        payload: 'parking_alert:$spotId',
+      );
+      return;
+    }
+
+    if (kind == 'parking_spot_freed') {
+      final spotNumber = data['spot_number'] ?? '';
+      final spotId = data['spot_id'] ?? '';
+      final title = data['title'] ?? 'Место освобождено';
+      final body = data['body'] ??
+          (spotNumber.isNotEmpty
+              ? 'Парковочное место №$spotNumber свободно'
+              : 'Парковочное место свободно');
+      final notifId = DateTime.now().millisecondsSinceEpoch & 0x7fffffff;
+      await _local.show(
+        notifId,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _parkingChannelId,
+            _parkingChannelName,
+            channelDescription: _parkingChannelDescription,
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
+          iOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          ),
+        ),
+        payload: 'parking_spot_freed:$spotId',
+      );
+      return;
+    }
   }
 
   static Future<void> _saveToHistory(Map<String, String> data) async {
@@ -373,7 +557,6 @@ class NotificationsService {
     }
   }
 
-  /// Читает историю пуш-уведомлений из SharedPreferences (новые сверху).
   Future<List<NotificationHistoryItem>> getHistory() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -396,13 +579,79 @@ class NotificationsService {
   }
 
   void _emitIfSensorAlert(Map<String, String> data) {
-    if (data['kind'] != 'sensor_alert') return;
-    _eventController.add(data);
-    SensorService.instance.refreshFromPush(data);
+    final kind = data['kind'] ?? '';
+    if (kind == 'sensor_alert') {
+      _eventController.add(data);
+      SensorService.instance.refreshFromPush(data);
+    } else if (kind == 'unknown_vehicle') {
+      BarrierService.instance.refreshFromPush(data);
+    } else if (kind == 'parking_alert' || kind == 'parking_spot_freed') {
+      ParkingService.instance.refreshFromPush(data);
+    }
+    // guest_arrived: only a local notification banner, no stream update needed
+    _emitInApp(data);
+  }
+
+  void _emitInApp(Map<String, String> data) {
+    final kind = data['kind'] ?? '';
+    debugPrint('[FCM] _emitInApp called, kind=$kind');
+    String title, body;
+    switch (kind) {
+      case 'sensor_alert':
+        title = data['title'] ?? 'Тревога';
+        body = data['body'] ?? '';
+      case 'unknown_vehicle':
+        title = data['title'] ?? 'Неизвестный автомобиль';
+        body = data['body'] ?? 'Номер: ${data['plate_number'] ?? '—'} — требует решения';
+      case 'guest_arrived':
+        title = data['title'] ?? 'Гость въехал';
+        body = data['body'] ?? '${data['guest_name'] ?? 'Гость'} прибыл на территорию ЖК';
+      case 'parking_alert':
+        title = data['title'] ?? 'Тревога парковки';
+        body = data['body'] ?? 'Место №${data['spot_number'] ?? ''} занято';
+      case 'parking_spot_freed':
+        title = data['title'] ?? 'Место освобождено';
+        body = data['body'] ?? 'Парковочное место №${data['spot_number'] ?? ''} свободно';
+      default:
+        debugPrint('[FCM] _emitInApp: unknown kind=$kind, skipping');
+        return;
+    }
+    debugPrint('[FCM] _emitInApp: emitting title=$title');
+    _inAppController.add((title: title, body: body));
+  }
+
+  // Decodes a local notification payload string back to a data map.
+  // Format: "<kind>:<extra>" e.g. "sensor_alert:evt-42", "unknown_vehicle:uuid", "guest_arrived:"
+  static Map<String, String> _payloadToMessage(String payload) {
+    final idx = payload.indexOf(':');
+    if (idx == -1) return {'kind': 'sensor_alert', 'event_id': payload};
+    final kind = payload.substring(0, idx);
+    final extra = payload.substring(idx + 1);
+    if (kind == 'unknown_vehicle') {
+      return {'kind': 'unknown_vehicle', 'event_id': extra};
+    }
+    if (kind == 'guest_arrived') {
+      return {'kind': 'guest_arrived'};
+    }
+    if (kind == 'parking_alert') {
+      return {'kind': 'parking_alert', 'spot_id': extra};
+    }
+    if (kind == 'parking_spot_freed') {
+      return {'kind': 'parking_spot_freed', 'spot_id': extra};
+    }
+    return {'kind': 'sensor_alert', 'event_id': payload};
   }
 
   static Map<String, String> _stringMap(Map<String, dynamic> raw) {
     return raw.map((k, v) => MapEntry(k.toString(), v?.toString() ?? ''));
+  }
+
+  static bool _isAndroidNativeForegroundKind(String? kind) {
+    if (!Platform.isAndroid) return false;
+    return kind == 'unknown_vehicle' ||
+        kind == 'guest_arrived' ||
+        kind == 'parking_alert' ||
+        kind == 'parking_spot_freed';
   }
 
   String _platformName() {

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
 import '../services/api_client.dart';
+import '../utils/error_helper.dart';
 
 class GuestsPage extends StatefulWidget {
   const GuestsPage({super.key});
@@ -52,7 +54,7 @@ class _GuestsPageState extends State<GuestsPage> {
       setState(() { _passes = items; _loadingPasses = false; });
     } catch (e) {
       if (!mounted) return;
-      setState(() { _error = 'Ошибка загрузки пропусков: $e'; _loadingPasses = false; });
+      setState(() { _error = friendlyError(e); _loadingPasses = false; });
     }
   }
 
@@ -116,22 +118,42 @@ class _GuestsPageState extends State<GuestsPage> {
       });
 
       final code = res.data['access_code'] as String;
+      final qr = res.data['qr_code']?.toString();
       _name.clear(); _phone.clear(); _car.clear();
       setState(() { _from = null; _to = null; _byCar = true; });
       await _loadPasses();
 
       if (!mounted) return;
-      showDialog(
+      setState(() => _loading = false);
+      await showDialog(
         context: context,
-        builder: (_) => AlertDialog(
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
           title: const Text('Пропуск создан'),
-          content: Text('Код: $code\n\nГость: $name'),
-          actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Ок'))],
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Text('Код: $code\n\nГость: $name'),
+                  if (qr != null) ...[
+                    const SizedBox(height: 16),
+                    QrImageView(data: qr, size: 160),
+                    const SizedBox(height: 6),
+                    const Text('Покажите этот QR охраннику', textAlign: TextAlign.center),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Ок'))],
         ),
       );
     } catch (e) {
       if (!mounted) return;
-      _snack('Ошибка создания пропуска: $e');
+      _snack(friendlyError(e));
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -229,20 +251,50 @@ class _GuestsPageState extends State<GuestsPage> {
                 const Card(child: Padding(padding: EdgeInsets.all(16), child: Text('Пропусков пока нет')))
               else
                 ..._passes.map((pass) => Card(
-                  child: ListTile(
-                    leading: Icon(pass.accessType == 'car' ? Icons.directions_car : Icons.directions_walk),
-                    title: Text(pass.guestName),
-                    subtitle: Text(
-                      'Код: ${pass.accessCode}\nС: ${_fmt(pass.validFrom)}\nПо: ${_fmt(pass.validUntil)}\nСтатус: ${_statusLabel(pass.status)}'
-                      '${pass.carNumber != null && pass.carNumber!.isNotEmpty ? "\nАвто: ${pass.carNumber}" : ""}',
+                  margin: const EdgeInsets.only(bottom: 8),
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(pass.accessType == 'car' ? Icons.directions_car : Icons.directions_walk),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(pass.guestName, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
+                            ),
+                            if (pass.status == 'active')
+                              PopupMenuButton<String>(
+                                onSelected: (v) { if (v == 'cancel') _cancelPass(pass); },
+                                itemBuilder: (_) => const [PopupMenuItem(value: 'cancel', child: Text('Отменить'))],
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Код: ${pass.accessCode}  ·  ${_statusLabel(pass.status)}'
+                          '\nС: ${_fmt(pass.validFrom)}\nПо: ${_fmt(pass.validUntil)}'
+                          '${pass.carNumber != null && pass.carNumber!.isNotEmpty ? "\nАвто: ${pass.carNumber}" : ""}',
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                        if (pass.qrCode != null && pass.qrCode!.isNotEmpty) ...[
+                          const SizedBox(height: 14),
+                          Center(
+                            child: Column(
+                              children: [
+                                QrImageView(data: pass.qrCode!, size: 180),
+                                const SizedBox(height: 6),
+                                const Text(
+                                  'Покажите этот QR охраннику',
+                                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
-                    isThreeLine: true,
-                    trailing: pass.status == 'active'
-                        ? PopupMenuButton<String>(
-                      onSelected: (v) { if (v == 'cancel') _cancelPass(pass); },
-                      itemBuilder: (_) => const [PopupMenuItem(value: 'cancel', child: Text('Отменить'))],
-                    )
-                        : null,
                   ),
                 )),
             ],
@@ -260,6 +312,7 @@ class _GuestPass {
   final String? carNumber;
   final String accessType;
   final String accessCode;
+  final String? qrCode;
   final DateTime validFrom;
   final DateTime validUntil;
   final String status;
@@ -271,6 +324,7 @@ class _GuestPass {
     required this.carNumber,
     required this.accessType,
     required this.accessCode,
+    required this.qrCode,
     required this.validFrom,
     required this.validUntil,
     required this.status,
@@ -283,6 +337,7 @@ class _GuestPass {
     carNumber: map['car_number']?.toString(),
     accessType: (map['access_type'] ?? 'walk').toString(),
     accessCode: (map['access_code'] ?? '').toString(),
+    qrCode: map['qr_code']?.toString(),
     validFrom: DateTime.tryParse((map['valid_from'] ?? '').toString()) ?? DateTime.now(),
     validUntil: DateTime.tryParse((map['valid_until'] ?? '').toString()) ?? DateTime.now(),
     status: (map['status'] ?? 'active').toString(),
