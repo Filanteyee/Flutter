@@ -3,7 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiClient {
-  static const _host = String.fromEnvironment('SERVER_HOST', defaultValue: '192.168.1.64');
+  static const _host = String.fromEnvironment('SERVER_HOST', defaultValue: '192.168.1.84');
 
   static String get baseUrl {
     if (kIsWeb) return 'http://localhost:8080/api/v1';

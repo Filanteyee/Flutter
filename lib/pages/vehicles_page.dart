@@ -59,9 +59,10 @@ class _VehiclesPageState extends State<VehiclesPage> {
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => AlertDialog(
           title: const Text('Добавить автомобиль'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
               TextField(
                 controller: plateCtrl,
                 textCapitalization: TextCapitalization.characters,
@@ -95,6 +96,7 @@ class _VehiclesPageState extends State<VehiclesPage> {
                 Text(err!, style: const TextStyle(color: Colors.red)),
               ],
             ],
+          ),
           ),
           actions: [
             TextButton(

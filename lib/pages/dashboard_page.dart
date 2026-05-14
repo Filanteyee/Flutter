@@ -24,6 +24,7 @@ import 'sensors_page.dart';
 import 'service_requests_page.dart';
 import 'services_page.dart';
 import 'vehicles_page.dart';
+import 'admin_staff_page.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -89,6 +90,8 @@ class _DashboardPageState extends State<DashboardPage>
         _isLoggedIn = true;
         _verificationStatus = verification;
         _loadingRole = false;
+        final pageCount = _pageCountForRole(role);
+        if (_index >= pageCount) _index = 0;
       });
       if (role == 'admin') {
         SensorService.instance.attachSse(SseService.instance);
@@ -135,44 +138,100 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
-  List<Widget> get _pages => [
-    _HomeOverviewTab(
-      role: _role,
-      userId: _userId,
-      isLoggedIn: _isLoggedIn,
-      verificationStatus: _verificationStatus,
-      onRefresh: _loadRole,
-      unreadNotifications: _unreadNotifications,
-      onNotificationsRead: _loadUnreadCount,
-    ),
-    const ServiceRequestsPage(),
-    const ServicesPage(),
-    const ParkingPage(),
-    const ProfilePage(),
-  ];
+  static int _pageCountForRole(String role) {
+    if (role == 'staff') return 2;
+    if (role == 'guard') return 4;
+    return 5;
+  }
 
-  List<BottomNavigationBarItem> get _items => const [
-    BottomNavigationBarItem(
-      icon: Icon(Icons.home_outlined),
-      label: 'Главная',
-    ),
-    BottomNavigationBarItem(
-      icon: Icon(Icons.build_outlined),
-      label: 'Заявки',
-    ),
-    BottomNavigationBarItem(
-      icon: Icon(Icons.grid_view_outlined),
-      label: 'Сервисы',
-    ),
-    BottomNavigationBarItem(
-      icon: Icon(Icons.local_parking),
-      label: 'Паркинг',
-    ),
-    BottomNavigationBarItem(
-      icon: Icon(Icons.person_outline),
-      label: 'Профиль',
-    ),
-  ];
+  List<Widget> get _pages {
+    if (_role == 'staff') {
+      return [
+        const ServiceRequestsPage(),
+        const ProfilePage(),
+      ];
+    }
+    if (_role == 'guard') {
+      return [
+        const BarrierPage(),
+        const ParkingPage(),
+        const GuestsPage(),
+        const ProfilePage(),
+      ];
+    }
+    return [
+      _HomeOverviewTab(
+        role: _role,
+        userId: _userId,
+        isLoggedIn: _isLoggedIn,
+        verificationStatus: _verificationStatus,
+        onRefresh: _loadRole,
+        unreadNotifications: _unreadNotifications,
+        onNotificationsRead: _loadUnreadCount,
+      ),
+      const ServiceRequestsPage(),
+      const ServicesPage(),
+      const ParkingPage(),
+      const ProfilePage(),
+    ];
+  }
+
+  List<BottomNavigationBarItem> get _items {
+    if (_role == 'staff') {
+      return const [
+        BottomNavigationBarItem(
+          icon: Icon(Icons.build_outlined),
+          label: 'Заявки',
+        ),
+        BottomNavigationBarItem(
+          icon: Icon(Icons.person_outline),
+          label: 'Профиль',
+        ),
+      ];
+    }
+    if (_role == 'guard') {
+      return const [
+        BottomNavigationBarItem(
+          icon: Icon(Icons.garage_outlined),
+          label: 'Шлагбаум',
+        ),
+        BottomNavigationBarItem(
+          icon: Icon(Icons.local_parking),
+          label: 'Паркинг',
+        ),
+        BottomNavigationBarItem(
+          icon: Icon(Icons.badge_outlined),
+          label: 'Гости',
+        ),
+        BottomNavigationBarItem(
+          icon: Icon(Icons.person_outline),
+          label: 'Профиль',
+        ),
+      ];
+    }
+    return const [
+      BottomNavigationBarItem(
+        icon: Icon(Icons.home_outlined),
+        label: 'Главная',
+      ),
+      BottomNavigationBarItem(
+        icon: Icon(Icons.build_outlined),
+        label: 'Заявки',
+      ),
+      BottomNavigationBarItem(
+        icon: Icon(Icons.grid_view_outlined),
+        label: 'Сервисы',
+      ),
+      BottomNavigationBarItem(
+        icon: Icon(Icons.local_parking),
+        label: 'Паркинг',
+      ),
+      BottomNavigationBarItem(
+        icon: Icon(Icons.person_outline),
+        label: 'Профиль',
+      ),
+    ];
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -190,9 +249,7 @@ class _DashboardPageState extends State<DashboardPage>
         type: BottomNavigationBarType.fixed,
         onTap: (i) {
           setState(() => _index = i);
-          // При возврате на главную перечитываем роль и статус верификации,
-          // чтобы карточка датчиков сразу отразила свежее решение админа.
-          if (i == 0) _loadRole();
+          if (i == 0 && _role != 'staff' && _role != 'guard') _loadRole();
         },
       ),
     );
@@ -384,6 +441,19 @@ class _HomeOverviewTab extends StatelessWidget {
                       context,
                       MaterialPageRoute(
                         builder: (_) => const ParkingPage(),
+                      ),
+                    );
+                  },
+                ),
+                _ActionCard(
+                  title: 'Сотрудники',
+                  subtitle: 'Персонал ЖК и их заявки',
+                  icon: Icons.badge_outlined,
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const AdminStaffPage(),
                       ),
                     );
                   },
