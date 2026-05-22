@@ -14,7 +14,7 @@ class BarrierPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final role = ApiClient.instance.userRole ?? 'resident';
-    if (role == 'admin') {
+    if (role == 'admin' || role == 'guard') {
       return const _AdminBarrierPage();
     }
     return const _ResidentBarrierPage();
