@@ -172,6 +172,9 @@ class _KindIcon extends StatelessWidget {
       case 'parking_alert':
         icon = Icons.local_parking;
         color = Colors.orange;
+      case 'parking_no_permit':
+        icon = Icons.no_meeting_room;
+        color = Colors.red;
       default:
         icon = Icons.notifications;
         color = Colors.blue;

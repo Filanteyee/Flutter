@@ -534,6 +534,76 @@ class NotificationsService {
       );
       return;
     }
+
+    if (kind == 'sensor_offline') {
+      final title = data['title'] ?? 'Датчик не на связи';
+      final body = data['body'] ?? 'Датчик не отвечает';
+      final sensorId = data['sensor_id'] ?? '';
+      final notifId = sensorId.isNotEmpty
+          ? sensorId.hashCode & 0x7fffffff
+          : DateTime.now().millisecondsSinceEpoch & 0x7fffffff;
+      await _local.show(
+        notifId,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _channelId,
+            _channelName,
+            channelDescription: _channelDescription,
+            importance: Importance.high,
+            priority: Priority.high,
+            visibility: NotificationVisibility.public,
+            playSound: true,
+            enableVibration: true,
+          ),
+          iOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          ),
+        ),
+        payload: 'sensor_offline:$sensorId',
+      );
+      return;
+    }
+
+    if (kind == 'parking_no_permit') {
+      final plate = data['plate_number'] ?? '';
+      final eventId = data['event_id'] ?? '';
+      final title = data['title'] ?? '🚫 Нет доступа в паркинг';
+      final body = data['body'] ??
+          (plate.isNotEmpty
+              ? 'Автомобиль $plate не имеет пропуска на паркинг'
+              : 'Нет пропуска на паркинг');
+      final notifId = eventId.isNotEmpty
+          ? eventId.hashCode & 0x7fffffff
+          : DateTime.now().millisecondsSinceEpoch & 0x7fffffff;
+      await _local.show(
+        notifId,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _parkingChannelId,
+            _parkingChannelName,
+            channelDescription: _parkingChannelDescription,
+            importance: Importance.high,
+            priority: Priority.high,
+            visibility: NotificationVisibility.public,
+            playSound: true,
+            enableVibration: true,
+          ),
+          iOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          ),
+        ),
+        payload: 'parking_no_permit:$eventId',
+      );
+      return;
+    }
   }
 
   static Future<void> _saveToHistory(Map<String, String> data) async {
@@ -583,6 +653,8 @@ class NotificationsService {
     if (kind == 'sensor_alert') {
       _eventController.add(data);
       SensorService.instance.refreshFromPush(data);
+    } else if (kind == 'sensor_offline') {
+      SensorService.instance.refreshFromPush(data);
     } else if (kind == 'unknown_vehicle') {
       BarrierService.instance.refreshFromPush(data);
     } else if (kind == 'parking_alert' || kind == 'parking_spot_freed') {
@@ -595,11 +667,10 @@ class NotificationsService {
   void _emitInApp(Map<String, String> data) {
     final kind = data['kind'] ?? '';
     debugPrint('[FCM] _emitInApp called, kind=$kind');
+    // sensor_alert / sensor_offline показываются через push (_showFromData),
+    // нижний баннер для них не нужен.
     String title, body;
     switch (kind) {
-      case 'sensor_alert':
-        title = data['title'] ?? 'Тревога';
-        body = data['body'] ?? '';
       case 'unknown_vehicle':
         title = data['title'] ?? 'Неизвестный автомобиль';
         body = data['body'] ?? 'Номер: ${data['plate_number'] ?? '—'} — требует решения';

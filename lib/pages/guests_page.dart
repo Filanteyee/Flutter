@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
+import '../models/parking_spot.dart';
 import '../services/api_client.dart';
+import '../services/parking_service.dart';
 import '../utils/error_helper.dart';
 
 class GuestsPage extends StatefulWidget {
@@ -24,11 +26,26 @@ class _GuestsPageState extends State<GuestsPage> {
   bool _loadingPasses = true;
   String? _error;
   List<_GuestPass> _passes = [];
+  List<ParkingSpot> _guestSpots = [];
+  String? _selectedGuestSpotId;
 
   @override
   void initState() {
     super.initState();
     _loadPasses();
+    _loadGuestSpots();
+  }
+
+  Future<void> _loadGuestSpots() async {
+    try {
+      final spots = await ParkingService.instance.getSpots();
+      if (!mounted) return;
+      setState(() {
+        _guestSpots = spots
+            .where((s) => s.type == ParkingSpotType.guest)
+            .toList();
+      });
+    } catch (_) {}
   }
 
   @override
@@ -115,13 +132,15 @@ class _GuestsPageState extends State<GuestsPage> {
         'access_type': _byCar ? 'car' : 'walk',
         'valid_from': _from!.toUtc().toIso8601String(),
         'valid_until': _to!.toUtc().toIso8601String(),
+        if (_byCar && _selectedGuestSpotId != null)
+          'parking_spot_id': _selectedGuestSpotId,
       });
 
       final code = res.data['access_code'] as String;
       final qr = res.data['qr_code']?.toString();
       _name.clear(); _phone.clear(); _car.clear();
-      setState(() { _from = null; _to = null; _byCar = true; });
-      await _loadPasses();
+      setState(() { _from = null; _to = null; _byCar = true; _selectedGuestSpotId = null; });
+      await Future.wait([_loadPasses(), _loadGuestSpots()]);
 
       if (!mounted) return;
       setState(() => _loading = false);
@@ -171,6 +190,46 @@ class _GuestsPageState extends State<GuestsPage> {
     }
   }
 
+  Set<String> get _myActivePassSpotIds => _passes
+      .where((p) => p.status == 'active' && p.parkingSpotId != null)
+      .map((p) => p.parkingSpotId!)
+      .toSet();
+
+  Future<void> _reportGuestSpotToAdmin(ParkingSpot spot) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Гостевое место занято'),
+        content: Text(
+          'Место ${spot.spotNumber} занято, хотя для него есть активный пропуск. Сообщить администратору?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Сообщить'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await _api.post('/service-requests', data: {
+        'category': 'Паркинг',
+        'description': 'Гостевое место ${spot.spotNumber} занято посторонним ТС, хотя для него есть активный гостевой пропуск.',
+      });
+      if (!mounted) return;
+      _snack('Заявка администратору отправлена');
+    } catch (e) {
+      if (!mounted) return;
+      _snack(friendlyError(e));
+    }
+  }
+
   void _snack(String msg) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
 
   @override
@@ -197,7 +256,96 @@ class _GuestsPageState extends State<GuestsPage> {
                       SwitchListTile(value: _byCar, onChanged: _loading ? null : (v) => setState(() => _byCar = v), title: const Text('Гость на авто')),
                       if (_byCar) ...[
                         const SizedBox(height: 8),
-                        TextField(controller: _car, enabled: !_loading, decoration: const InputDecoration(labelText: 'Номер авто', border: OutlineInputBorder())),
+                        TextField(
+                          controller: _car,
+                          enabled: !_loading,
+                          decoration: const InputDecoration(
+                            labelText: 'Номер авто',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'Гостевое место (необязательно)',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                        const SizedBox(height: 8),
+                        if (_guestSpots.isEmpty)
+                          const Text('Нет гостевых мест',
+                              style: TextStyle(fontSize: 12, color: Colors.black54))
+                        else
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: _guestSpots.map((spot) {
+                              final isFree = spot.status == ParkingSpotStatus.free;
+                              final isReserved = spot.status == ParkingSpotStatus.reserved;
+                              final isSelected = _selectedGuestSpotId == spot.id;
+                              final color = isSelected
+                                  ? Colors.blue
+                                  : isFree
+                                      ? Colors.green
+                                      : isReserved
+                                          ? Colors.blue
+                                          : Colors.red;
+                              final label = isFree
+                                  ? 'Своб.'
+                                  : isReserved
+                                      ? 'Бронь'
+                                      : 'Занято';
+                              final isMyOccupied = !isFree &&
+                                  !isReserved &&
+                                  _myActivePassSpotIds.contains(spot.id);
+                              return GestureDetector(
+                                onTap: _loading
+                                    ? null
+                                    : isMyOccupied
+                                        ? () => _reportGuestSpotToAdmin(spot)
+                                        : !isFree
+                                            ? () => _snack(
+                                                isReserved
+                                                    ? 'Место ${spot.spotNumber} забронировано. Выберите другое место.'
+                                                    : 'Место ${spot.spotNumber} занято. Выберите другое место.')
+                                            : () => setState(() =>
+                                                _selectedGuestSpotId =
+                                                    isSelected ? null : spot.id),
+                                child: Container(
+                                  width: 64,
+                                  height: 56,
+                                  decoration: BoxDecoration(
+                                    color: color.withValues(alpha: isSelected ? 0.2 : 0.1),
+                                    border: Border.all(
+                                        color: color.withValues(alpha: isSelected ? 1.0 : 0.5),
+                                        width: isSelected ? 2 : 1),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Icon(Icons.local_parking,
+                                          color: color, size: 16),
+                                      const SizedBox(height: 2),
+                                      Text(spot.spotNumber,
+                                          style: TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.bold,
+                                              color: color),
+                                          textAlign: TextAlign.center),
+                                      Text(label,
+                                          style: TextStyle(fontSize: 9, color: color)),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        if (_selectedGuestSpotId != null) ...[
+                          const SizedBox(height: 6),
+                          Text(
+                            'Выбрано: ${_guestSpots.firstWhere((s) => s.id == _selectedGuestSpotId).spotNumber}',
+                            style: const TextStyle(fontSize: 12, color: Colors.blue),
+                          ),
+                        ],
                       ],
                       const SizedBox(height: 12),
                       SizedBox(
@@ -316,6 +464,7 @@ class _GuestPass {
   final DateTime validFrom;
   final DateTime validUntil;
   final String status;
+  final String? parkingSpotId;
 
   const _GuestPass({
     required this.id,
@@ -328,6 +477,7 @@ class _GuestPass {
     required this.validFrom,
     required this.validUntil,
     required this.status,
+    required this.parkingSpotId,
   });
 
   factory _GuestPass.fromMap(Map<String, dynamic> map) => _GuestPass(
@@ -341,5 +491,6 @@ class _GuestPass {
     validFrom: DateTime.tryParse((map['valid_from'] ?? '').toString()) ?? DateTime.now(),
     validUntil: DateTime.tryParse((map['valid_until'] ?? '').toString()) ?? DateTime.now(),
     status: (map['status'] ?? 'active').toString(),
+    parkingSpotId: map['parking_spot_id']?.toString(),
   );
 }

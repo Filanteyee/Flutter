@@ -96,11 +96,11 @@ class _DashboardPageState extends State<DashboardPage>
       if (role == 'admin') {
         SensorService.instance.attachSse(SseService.instance);
         SseService.instance.connect();
-        _loadUnreadCount();
       } else {
         SseService.instance.disconnect();
         SensorService.instance.detachSse();
       }
+      _loadUnreadCount();
       _consumePendingNotification();
     } catch (_) {
       if (!mounted) return;
@@ -285,7 +285,7 @@ class _HomeOverviewTab extends StatelessWidget {
       appBar: AppBar(
         title: Text(_isAdmin ? 'Панель администратора' : 'Главная'),
         actions: [
-          if (_isAdmin)
+          if (isLoggedIn)
             Stack(
               children: [
                 IconButton(

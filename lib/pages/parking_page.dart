@@ -41,6 +41,7 @@ class _ResidentParkingPageState extends State<_ResidentParkingPage> {
   List<ParkingSpot> _spots = [];
   List<ParkingBooking> _bookings = [];
   List<ParkingPermit> _permits = [];
+  Set<String> _myGuestPassSpotIds = {};
 
   @override
   void initState() {
@@ -55,12 +56,20 @@ class _ResidentParkingPageState extends State<_ResidentParkingPage> {
         _service.getSpots(),
         _service.getMyBookings(),
         _service.getMyPermits(),
+        ApiClient.instance.get('/guest-access'),
       ]);
       if (!mounted) return;
+      final guestPasses = ((results[3] as dynamic).data as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
       setState(() {
         _spots = results[0] as List<ParkingSpot>;
         _bookings = results[1] as List<ParkingBooking>;
         _permits = results[2] as List<ParkingPermit>;
+        _myGuestPassSpotIds = guestPasses
+            .where((p) => p['status'] == 'active' && p['parking_spot_id'] != null)
+            .map((p) => p['parking_spot_id'] as String)
+            .toSet();
         _loading = false;
       });
     } catch (e) {
@@ -112,6 +121,41 @@ class _ResidentParkingPageState extends State<_ResidentParkingPage> {
       await ApiClient.instance.post('/service-requests', data: {
         'category': 'Паркинг',
         'description': 'Моё постоянное место ${spot.spotNumber} занято посторонним ТС.',
+      });
+      if (!mounted) return;
+      _snack('Заявка администратору отправлена');
+    } catch (e) {
+      if (!mounted) return;
+      _snack(friendlyError(e));
+    }
+  }
+
+  Future<void> _reportGuestSpotToAdmin(ParkingSpot spot) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Гостевое место занято'),
+        content: Text(
+          'Место ${spot.spotNumber} занято, хотя для него есть активный пропуск. Сообщить администратору?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Сообщить'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await ApiClient.instance.post('/service-requests', data: {
+        'category': 'Паркинг',
+        'description': 'Гостевое место ${spot.spotNumber} занято посторонним ТС, хотя для него есть активный гостевой пропуск.',
       });
       if (!mounted) return;
       _snack('Заявка администратору отправлена');
@@ -180,9 +224,13 @@ class _ResidentParkingPageState extends State<_ResidentParkingPage> {
                         _GuestSpotsGrid(
                           spots: _guestSpots,
                           myActiveSpotIds: _myActiveSpotIds,
+                          myGuestPassSpotIds: _myGuestPassSpotIds,
                           onTap: (spot) {
                             if (spot.status == ParkingSpotStatus.free) {
                               _showBookingSheet(spot);
+                            } else if (_myGuestPassSpotIds.contains(spot.id) &&
+                                spot.status == ParkingSpotStatus.occupied) {
+                              _reportGuestSpotToAdmin(spot);
                             }
                           },
                         ),
@@ -557,11 +605,13 @@ class _PermanentSpotCard extends StatelessWidget {
 class _GuestSpotsGrid extends StatelessWidget {
   final List<ParkingSpot> spots;
   final Set<String> myActiveSpotIds;
+  final Set<String> myGuestPassSpotIds;
   final void Function(ParkingSpot) onTap;
 
   const _GuestSpotsGrid({
     required this.spots,
     required this.myActiveSpotIds,
+    required this.myGuestPassSpotIds,
     required this.onTap,
   });
 
@@ -580,12 +630,19 @@ class _GuestSpotsGrid extends StatelessWidget {
       itemBuilder: (_, i) {
         final spot = spots[i];
         final isMine = myActiveSpotIds.contains(spot.id);
+        final isMyGuestSpot = myGuestPassSpotIds.contains(spot.id);
+        final isWronglyOccupied =
+            isMyGuestSpot && spot.status == ParkingSpotStatus.occupied;
 
         final Color color;
         if (isMine) {
           color = Colors.blue;
+        } else if (isWronglyOccupied) {
+          color = Colors.red;
         } else if (spot.status == ParkingSpotStatus.free) {
           color = Colors.green;
+        } else if (spot.status == ParkingSpotStatus.reserved) {
+          color = Colors.blue;
         } else {
           color = Colors.red;
         }
@@ -595,14 +652,21 @@ class _GuestSpotsGrid extends StatelessWidget {
           child: Container(
             decoration: BoxDecoration(
               color: color.withValues(alpha: 0.15),
-              border: Border.all(color: color.withValues(alpha: 0.6)),
+              border: Border.all(
+                color: color.withValues(alpha: isWronglyOccupied ? 1.0 : 0.6),
+                width: isWronglyOccupied ? 2 : 1,
+              ),
               borderRadius: BorderRadius.circular(10),
             ),
             alignment: Alignment.center,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(Icons.local_parking, color: color, size: 18),
+                Icon(
+                  isWronglyOccupied ? Icons.warning_amber_rounded : Icons.local_parking,
+                  color: color,
+                  size: 18,
+                ),
                 const SizedBox(height: 2),
                 Text(
                   spot.spotNumber,
@@ -613,6 +677,11 @@ class _GuestSpotsGrid extends StatelessWidget {
                   ),
                   textAlign: TextAlign.center,
                 ),
+                if (isWronglyOccupied)
+                  Text(
+                    '!',
+                    style: TextStyle(fontSize: 9, color: color, fontWeight: FontWeight.bold),
+                  ),
               ],
             ),
           ),
@@ -1027,21 +1096,31 @@ class _PermitSubmitDialogState extends State<_PermitSubmitDialog> {
   bool _submitting = false;
   String? _error;
   List<Map<String, dynamic>> _vehicles = [];
+  List<ParkingSpot> _permanentSpots = [];
   String? _selectedVehicleId;
+  String? _selectedSpotId;
+  File? _docFile;
+  String? _docFileName;
 
   @override
   void initState() {
     super.initState();
-    _loadVehicles();
+    _loadData();
   }
 
-  Future<void> _loadVehicles() async {
+  Future<void> _loadData() async {
     try {
-      final res = await ApiClient.instance.get('/vehicles');
+      final results = await Future.wait([
+        ApiClient.instance.get('/vehicles'),
+        ParkingService.instance.getSpots(),
+      ]);
       if (!mounted) return;
       setState(() {
-        _vehicles = (res.data as List)
+        _vehicles = ((results[0] as dynamic).data as List)
             .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+        _permanentSpots = (results[1] as List<ParkingSpot>)
+            .where((s) => s.type == ParkingSpotType.permanent)
             .toList();
         _loading = false;
       });
@@ -1051,11 +1130,27 @@ class _PermitSubmitDialogState extends State<_PermitSubmitDialog> {
     }
   }
 
+  Future<void> _pickDoc() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['pdf', 'jpg', 'jpeg', 'png'],
+    );
+    if (result == null || result.files.single.path == null) return;
+    setState(() {
+      _docFile = File(result.files.single.path!);
+      _docFileName = result.files.single.name;
+    });
+  }
+
   Future<void> _submit() async {
-    if (_selectedVehicleId == null) return;
+    if (_selectedVehicleId == null || _docFile == null) return;
     setState(() { _submitting = true; _error = null; });
     try {
-      await ParkingService.instance.submitPermit(_selectedVehicleId!);
+      final permit = await ParkingService.instance.submitPermit(
+        _selectedVehicleId!,
+        spotId: _selectedSpotId,
+      );
+      await ParkingService.instance.uploadPermitDocument(permit.id, _docFile!);
       if (!mounted) return;
       Navigator.pop(context);
       widget.onSubmitted();
@@ -1067,6 +1162,11 @@ class _PermitSubmitDialogState extends State<_PermitSubmitDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final canSubmit = !_submitting &&
+        _selectedVehicleId != null &&
+        _docFile != null &&
+        _vehicles.isNotEmpty;
+
     return AlertDialog(
       title: const Text('Заявка на пропуск'),
       content: SizedBox(
@@ -1079,10 +1179,10 @@ class _PermitSubmitDialogState extends State<_PermitSubmitDialog> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'Выберите автомобиль для которого хотите получить пропуск на паркинг.',
+                      'Выберите автомобиль',
                       style: TextStyle(fontSize: 13),
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: 8),
                     if (_vehicles.isEmpty)
                       const Text(
                         'У вас нет зарегистрированных автомобилей.\nСначала добавьте автомобиль в разделе «Мои автомобили».',
@@ -1093,21 +1193,107 @@ class _PermitSubmitDialogState extends State<_PermitSubmitDialog> {
                         final id = v['id'] as String;
                         final plate = v['plate_number'] as String? ?? '';
                         final brand = v['brand'] as String? ?? '';
-                        // ignore: deprecated_member_use
                         return RadioListTile<String>(
                           value: id,
-                          // ignore: deprecated_member_use
                           groupValue: _selectedVehicleId,
-                          // ignore: deprecated_member_use
                           onChanged: (val) =>
                               setState(() => _selectedVehicleId = val),
                           title: Text(plate,
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.w600)),
+                              style: const TextStyle(fontWeight: FontWeight.w600)),
                           subtitle: brand.isNotEmpty ? Text(brand) : null,
                           contentPadding: EdgeInsets.zero,
                         );
                       }),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Желаемое парковочное место (необязательно)',
+                      style: TextStyle(fontSize: 13),
+                    ),
+                    const SizedBox(height: 8),
+                    if (_permanentSpots.isEmpty)
+                      const Text('Нет доступных постоянных мест',
+                          style: TextStyle(fontSize: 12, color: Colors.black54))
+                    else
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: _permanentSpots.map((spot) {
+                          final isFree = spot.status == ParkingSpotStatus.free;
+                          final isSelected = _selectedSpotId == spot.id;
+                          final color = isSelected
+                              ? Colors.blue
+                              : isFree
+                                  ? Colors.green
+                                  : Colors.red;
+                          return GestureDetector(
+                            onTap: () => setState(() =>
+                                _selectedSpotId =
+                                    isSelected ? null : spot.id),
+                            child: Container(
+                              width: 64,
+                              height: 56,
+                              decoration: BoxDecoration(
+                                color: color.withValues(alpha: isSelected ? 0.2 : 0.1),
+                                border: Border.all(
+                                    color: color.withValues(alpha: isSelected ? 1.0 : 0.5),
+                                    width: isSelected ? 2 : 1),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.local_parking,
+                                      color: color, size: 16),
+                                  const SizedBox(height: 2),
+                                  Text(spot.spotNumber,
+                                      style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.bold,
+                                          color: color),
+                                      textAlign: TextAlign.center),
+                                  Text(
+                                    isFree ? 'Своб.' : 'Занято',
+                                    style: TextStyle(
+                                        fontSize: 9, color: color),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    if (_selectedSpotId != null) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        'Выбрано: ${_permanentSpots.firstWhere((s) => s.id == _selectedSpotId).spotNumber}',
+                        style: const TextStyle(fontSize: 12, color: Colors.blue),
+                      ),
+                    ],
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Прикрепите документ (обязательно)',
+                      style: TextStyle(fontSize: 13),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: _submitting ? null : _pickDoc,
+                        icon: Icon(
+                          _docFile != null
+                              ? Icons.check_circle_outline
+                              : Icons.upload_file_outlined,
+                          color: _docFile != null ? Colors.green : null,
+                        ),
+                        label: Text(
+                          _docFileName ?? 'Выбрать файл (PDF, JPG, PNG)',
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: _docFile != null ? Colors.green : null,
+                          ),
+                        ),
+                      ),
+                    ),
                     if (_error != null) ...[
                       const SizedBox(height: 8),
                       Text(_error!,
@@ -1119,15 +1305,11 @@ class _PermitSubmitDialogState extends State<_PermitSubmitDialog> {
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.pop(context),
+          onPressed: _submitting ? null : () => Navigator.pop(context),
           child: const Text('Отмена'),
         ),
         FilledButton(
-          onPressed: (_submitting ||
-                  _selectedVehicleId == null ||
-                  _vehicles.isEmpty)
-              ? null
-              : _submit,
+          onPressed: canSubmit ? _submit : null,
           child: _submitting
               ? const SizedBox(
                   width: 16,

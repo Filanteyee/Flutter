@@ -92,9 +92,10 @@ class ParkingService {
   }
 
   /// POST /parking/permit
-  Future<ParkingPermit> submitPermit(String vehicleId) async {
+  Future<ParkingPermit> submitPermit(String vehicleId, {String? spotId}) async {
     final res = await ApiClient.instance.post('/parking/permit', data: {
       'vehicle_id': vehicleId,
+      if (spotId != null) 'spot_id': spotId,
     });
     return ParkingPermit.fromJson(Map<String, dynamic>.from(res.data as Map));
   }
