@@ -108,9 +108,10 @@ class _GuestsPageState extends State<GuestsPage> {
   }
 
   String _statusLabel(String status) => switch (status) {
-    'active' => 'Активен',
-    'used' => 'Использован',
-    'expired' => 'Истёк',
+    'active'   => 'Активен',
+    'arrived'  => 'На территории',
+    'used'     => 'Использован',
+    'expired'  => 'Истёк',
     'cancelled' => 'Отменён',
     _ => status,
   };
@@ -191,7 +192,7 @@ class _GuestsPageState extends State<GuestsPage> {
   }
 
   Set<String> get _myActivePassSpotIds => _passes
-      .where((p) => p.status == 'active' && p.parkingSpotId != null)
+      .where((p) => (p.status == 'active' || p.status == 'arrived') && p.parkingSpotId != null)
       .map((p) => p.parkingSpotId!)
       .toSet();
 

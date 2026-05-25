@@ -29,7 +29,8 @@ String specialtyLabel(String specialty) => switch (specialty) {
     };
 
 class ServiceRequestsPage extends StatefulWidget {
-  const ServiceRequestsPage({super.key});
+  final String? prefilledTitle;
+  const ServiceRequestsPage({super.key, this.prefilledTitle});
 
   @override
   State<ServiceRequestsPage> createState() => _ServiceRequestsPageState();
@@ -51,6 +52,19 @@ class _ServiceRequestsPageState extends State<ServiceRequestsPage> {
   void initState() {
     super.initState();
     _loadRequests();
+    if (widget.prefilledTitle != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _showCreateSheet());
+    }
+  }
+
+  Future<void> _showCreateSheet() async {
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => CreateRequestSheet(prefilledDescription: widget.prefilledTitle),
+    );
+    await _loadRequests();
   }
 
   Future<void> _loadRequests() async {
@@ -109,6 +123,25 @@ class _ServiceRequestsPageState extends State<ServiceRequestsPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Заявка взята в работу')),
       );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка: $e')),
+      );
+    }
+  }
+
+  Future<void> _resolveAppeal(String id, bool approved) async {
+    try {
+      await _api.post(
+        '/admin/service-requests/$id/resolve-appeal',
+        data: {'approved': approved},
+      );
+      await _loadRequests();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(approved ? 'Пропуск одобрен' : 'Апелляция отклонена'),
+      ));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -208,6 +241,10 @@ class _ServiceRequestsPageState extends State<ServiceRequestsPage> {
                                       _changeStatus(filtered[i], 'rejected'),
                                   onAssign: () =>
                                       _showAssignSheet(filtered[i]),
+                                  onResolveAppeal: _isAdmin
+                                      ? (approved) => _resolveAppeal(
+                                            filtered[i].id, approved)
+                                      : null,
                                 ),
                               ),
                             ),
@@ -304,6 +341,7 @@ class _RequestCard extends StatelessWidget {
   final VoidCallback onDone;
   final VoidCallback onReject;
   final VoidCallback onAssign;
+  final void Function(bool approved)? onResolveAppeal;
 
   const _RequestCard({
     required this.request,
@@ -315,6 +353,7 @@ class _RequestCard extends StatelessWidget {
     required this.onDone,
     required this.onReject,
     required this.onAssign,
+    this.onResolveAppeal,
   });
 
   bool get _canTake =>
@@ -328,6 +367,16 @@ class _RequestCard extends StatelessWidget {
       request.status == 'in_progress';
 
   bool get _canAssign => isAdmin && request.status == 'new';
+
+  bool get _isParkingAppeal =>
+      request.description.contains('Апелляция по паркингу');
+
+  bool get _canResolveAppeal =>
+      onResolveAppeal != null &&
+      isAdmin &&
+      _isParkingAppeal &&
+      request.status != 'done' &&
+      request.status != 'rejected';
 
   @override
   Widget build(BuildContext context) {
@@ -495,6 +544,38 @@ class _RequestCard extends StatelessWidget {
                     ),
                   ),
                 ),
+              ),
+            ],
+            if (_canResolveAppeal) ...[
+              const Divider(height: 20),
+              Text(
+                'Апелляция по паркингу',
+                style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                    color: Colors.orange[800]),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: () => onResolveAppeal!(true),
+                      icon: const Icon(Icons.check),
+                      label: const Text('Одобрить пропуск'),
+                      style: FilledButton.styleFrom(
+                          backgroundColor: Colors.green),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => onResolveAppeal!(false),
+                      icon: const Icon(Icons.close),
+                      label: const Text('Отклонить'),
+                      style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.red),
+                    ),
+                  ),
+                ],
               ),
             ],
           ],

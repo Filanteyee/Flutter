@@ -1,7 +1,12 @@
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_pdfview/flutter_pdfview.dart';
+import 'package:open_file/open_file.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../models/parking_booking.dart';
 import '../models/parking_event.dart';
@@ -10,6 +15,7 @@ import '../models/parking_spot.dart';
 import '../services/api_client.dart';
 import '../services/parking_service.dart';
 import '../utils/error_helper.dart';
+import 'service_requests_page.dart';
 
 class ParkingPage extends StatelessWidget {
   const ParkingPage({super.key});
@@ -39,9 +45,8 @@ class _ResidentParkingPageState extends State<_ResidentParkingPage> {
   bool _loading = true;
   String? _error;
   List<ParkingSpot> _spots = [];
-  List<ParkingBooking> _bookings = [];
   List<ParkingPermit> _permits = [];
-  Set<String> _myGuestPassSpotIds = {};
+  bool _appealRejected = false;
 
   @override
   void initState() {
@@ -54,22 +59,20 @@ class _ResidentParkingPageState extends State<_ResidentParkingPage> {
       setState(() { _loading = true; _error = null; });
       final results = await Future.wait([
         _service.getSpots(),
-        _service.getMyBookings(),
         _service.getMyPermits(),
-        ApiClient.instance.get('/guest-access'),
+        ApiClient.instance.get('/service-requests'),
       ]);
       if (!mounted) return;
-      final guestPasses = ((results[3] as dynamic).data as List)
+      final serviceRequests = ((results[2] as dynamic).data as List)
           .map((e) => Map<String, dynamic>.from(e as Map))
           .toList();
       setState(() {
         _spots = results[0] as List<ParkingSpot>;
-        _bookings = results[1] as List<ParkingBooking>;
-        _permits = results[2] as List<ParkingPermit>;
-        _myGuestPassSpotIds = guestPasses
-            .where((p) => p['status'] == 'active' && p['parking_spot_id'] != null)
-            .map((p) => p['parking_spot_id'] as String)
-            .toSet();
+        _permits = results[1] as List<ParkingPermit>;
+        _appealRejected = serviceRequests.any(
+          (r) => ((r['description'] as String?) ?? '').contains('Апелляция по паркингу') &&
+                  r['status'] == 'rejected',
+        );
         _loading = false;
       });
     } catch (e) {
@@ -90,72 +93,11 @@ class _ResidentParkingPageState extends State<_ResidentParkingPage> {
     }
   }
 
-  List<ParkingSpot> get _guestSpots =>
-      _spots.where((s) => s.type == ParkingSpotType.guest).toList();
-
-  Set<String> get _myActiveSpotIds => _bookings
-      .where((b) => b.status == BookingStatus.active)
-      .map((b) => b.spotId)
-      .toSet();
-
-  Future<void> _showBookingSheet(ParkingSpot spot) async {
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (_) => _BookingSheet(spot: spot, onBooked: _load),
-    );
-  }
-
-  Future<void> _cancelBooking(ParkingBooking booking) async {
-    try {
-      await _service.cancelBooking(booking.id);
-      await _load();
-    } catch (e) {
-      if (!mounted) return;
-      _snack(friendlyError(e));
-    }
-  }
-
   Future<void> _reportToAdmin(ParkingSpot spot) async {
     try {
       await ApiClient.instance.post('/service-requests', data: {
         'category': 'Паркинг',
         'description': 'Моё постоянное место ${spot.spotNumber} занято посторонним ТС.',
-      });
-      if (!mounted) return;
-      _snack('Заявка администратору отправлена');
-    } catch (e) {
-      if (!mounted) return;
-      _snack(friendlyError(e));
-    }
-  }
-
-  Future<void> _reportGuestSpotToAdmin(ParkingSpot spot) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Гостевое место занято'),
-        content: Text(
-          'Место ${spot.spotNumber} занято, хотя для него есть активный пропуск. Сообщить администратору?',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Отмена'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            child: const Text('Сообщить'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-    try {
-      await ApiClient.instance.post('/service-requests', data: {
-        'category': 'Паркинг',
-        'description': 'Гостевое место ${spot.spotNumber} занято посторонним ТС, хотя для него есть активный гостевой пропуск.',
       });
       if (!mounted) return;
       _snack('Заявка администратору отправлена');
@@ -197,6 +139,7 @@ class _ResidentParkingPageState extends State<_ResidentParkingPage> {
                       _PermitSection(
                         permits: _permits,
                         onRefresh: _load,
+                        appealRejected: _appealRejected,
                       ),
                       const SizedBox(height: 20),
 
@@ -209,54 +152,7 @@ class _ResidentParkingPageState extends State<_ResidentParkingPage> {
                         const SizedBox(height: 20),
                       ],
 
-                      // ── Гостевые места ──
-                      Text('Гостевые места',
-                          style: Theme.of(context).textTheme.titleMedium),
-                      const SizedBox(height: 10),
-                      if (_guestSpots.isEmpty)
-                        const Card(
-                          child: Padding(
-                            padding: EdgeInsets.all(16),
-                            child: Text('Нет гостевых мест'),
-                          ),
-                        )
-                      else
-                        _GuestSpotsGrid(
-                          spots: _guestSpots,
-                          myActiveSpotIds: _myActiveSpotIds,
-                          myGuestPassSpotIds: _myGuestPassSpotIds,
-                          onTap: (spot) {
-                            if (spot.status == ParkingSpotStatus.free) {
-                              _showBookingSheet(spot);
-                            } else if (_myGuestPassSpotIds.contains(spot.id) &&
-                                spot.status == ParkingSpotStatus.occupied) {
-                              _reportGuestSpotToAdmin(spot);
-                            }
-                          },
-                        ),
-
-                      // ── Мои брони ──
-                      const SizedBox(height: 20),
-                      Text('Мои бронирования',
-                          style: Theme.of(context).textTheme.titleMedium),
-                      const SizedBox(height: 10),
-                      if (_bookings.isEmpty)
-                        const Card(
-                          child: Padding(
-                            padding: EdgeInsets.all(16),
-                            child: Text('Нет бронирований'),
-                          ),
-                        )
-                      else
-                        ..._bookings.map(
-                          (b) => _BookingCard(
-                            booking: b,
-                            onCancel: b.status == BookingStatus.active
-                                ? () => _cancelBooking(b)
-                                : null,
-                          ),
-                        ),
-                      const SizedBox(height: 24),
+                      const SizedBox(height: 8),
                     ],
                   ),
                 ),
@@ -602,95 +498,6 @@ class _PermanentSpotCard extends StatelessWidget {
   }
 }
 
-class _GuestSpotsGrid extends StatelessWidget {
-  final List<ParkingSpot> spots;
-  final Set<String> myActiveSpotIds;
-  final Set<String> myGuestPassSpotIds;
-  final void Function(ParkingSpot) onTap;
-
-  const _GuestSpotsGrid({
-    required this.spots,
-    required this.myActiveSpotIds,
-    required this.myGuestPassSpotIds,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 4,
-        crossAxisSpacing: 8,
-        mainAxisSpacing: 8,
-        childAspectRatio: 1,
-      ),
-      itemCount: spots.length,
-      itemBuilder: (_, i) {
-        final spot = spots[i];
-        final isMine = myActiveSpotIds.contains(spot.id);
-        final isMyGuestSpot = myGuestPassSpotIds.contains(spot.id);
-        final isWronglyOccupied =
-            isMyGuestSpot && spot.status == ParkingSpotStatus.occupied;
-
-        final Color color;
-        if (isMine) {
-          color = Colors.blue;
-        } else if (isWronglyOccupied) {
-          color = Colors.red;
-        } else if (spot.status == ParkingSpotStatus.free) {
-          color = Colors.green;
-        } else if (spot.status == ParkingSpotStatus.reserved) {
-          color = Colors.blue;
-        } else {
-          color = Colors.red;
-        }
-
-        return GestureDetector(
-          onTap: () => onTap(spot),
-          child: Container(
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.15),
-              border: Border.all(
-                color: color.withValues(alpha: isWronglyOccupied ? 1.0 : 0.6),
-                width: isWronglyOccupied ? 2 : 1,
-              ),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            alignment: Alignment.center,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  isWronglyOccupied ? Icons.warning_amber_rounded : Icons.local_parking,
-                  color: color,
-                  size: 18,
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  spot.spotNumber,
-                  style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.bold,
-                    color: color,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                if (isWronglyOccupied)
-                  Text(
-                    '!',
-                    style: TextStyle(fontSize: 9, color: color, fontWeight: FontWeight.bold),
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
 class _BookingCard extends StatelessWidget {
   final ParkingBooking booking;
   final VoidCallback? onCancel;
@@ -770,143 +577,26 @@ class _SpotStatusDot extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────
-// BOOKING SHEET
-// ─────────────────────────────────────────────────────────────
-
-class _BookingSheet extends StatefulWidget {
-  final ParkingSpot spot;
-  final VoidCallback onBooked;
-
-  const _BookingSheet({required this.spot, required this.onBooked});
-
-  @override
-  State<_BookingSheet> createState() => _BookingSheetState();
-}
-
-class _BookingSheetState extends State<_BookingSheet> {
-  DateTime? _from;
-  DateTime? _to;
-  bool _saving = false;
-  String? _error;
-
-  Future<void> _pickDateTime({required bool isFrom}) async {
-    final now = DateTime.now();
-    final date = await showDatePicker(
-      context: context,
-      firstDate: now,
-      lastDate: now.add(const Duration(days: 30)),
-      initialDate: isFrom ? (_from ?? now) : (_to ?? _from ?? now),
-    );
-    if (date == null || !mounted) return;
-    final time = await showTimePicker(
-      context: context,
-      initialTime: TimeOfDay.fromDateTime(isFrom ? (_from ?? now) : (_to ?? now)),
-    );
-    if (time == null || !mounted) return;
-    final dt = DateTime(date.year, date.month, date.day, time.hour, time.minute);
-    setState(() {
-      if (isFrom) {
-        _from = dt;
-        if (_to != null && !_to!.isAfter(_from!)) _to = null;
-      } else {
-        _to = dt;
-      }
-    });
-  }
-
-  Future<void> _confirm() async {
-    if (_from == null || _to == null) {
-      setState(() => _error = 'Выберите время начала и конца');
-      return;
-    }
-    if (!_to!.isAfter(_from!)) {
-      setState(() => _error = 'Время конца должно быть позже начала');
-      return;
-    }
-    setState(() { _saving = true; _error = null; });
-    try {
-      await ParkingService.instance.createBooking(
-        spotId: widget.spot.id,
-        startTime: _from!,
-        endTime: _to!,
-      );
-      if (!mounted) return;
-      Navigator.pop(context);
-      widget.onBooked();
-    } catch (e) {
-      if (!mounted) return;
-      setState(() { _error = friendlyError(e); _saving = false; });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-          16, 16, 16, MediaQuery.of(context).viewInsets.bottom + 24),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Забронировать место ${widget.spot.spotNumber}',
-              style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 16),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: _saving ? null : () => _pickDateTime(isFrom: true),
-              icon: const Icon(Icons.schedule),
-              label: Text(_from == null ? 'С: выбрать' : 'С: ${_fmtDate(_from!)}'),
-            ),
-          ),
-          const SizedBox(height: 10),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: (_saving || _from == null)
-                  ? null
-                  : () => _pickDateTime(isFrom: false),
-              icon: const Icon(Icons.schedule_outlined),
-              label: Text(_to == null ? 'По: выбрать' : 'По: ${_fmtDate(_to!)}'),
-            ),
-          ),
-          if (_error != null) ...[
-            const SizedBox(height: 8),
-            Text(_error!, style: const TextStyle(color: Colors.red)),
-          ],
-          const SizedBox(height: 16),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton(
-              onPressed: _saving ? null : _confirm,
-              child: _saving
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white))
-                  : const Text('Забронировать'),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
 // PERMIT SECTION (resident)
 // ─────────────────────────────────────────────────────────────
 
 class _PermitSection extends StatelessWidget {
   final List<ParkingPermit> permits;
   final VoidCallback onRefresh;
+  final bool appealRejected;
 
-  const _PermitSection({required this.permits, required this.onRefresh});
+  const _PermitSection({
+    required this.permits,
+    required this.onRefresh,
+    this.appealRejected = false,
+  });
+
+  int get _rejectedCount => permits.where((p) => p.isRejected).length;
 
   @override
   Widget build(BuildContext context) {
     final activePermit = permits.isEmpty ? null : permits.first;
+    final rejected = _rejectedCount;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -915,9 +605,18 @@ class _PermitSection extends StatelessWidget {
             style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 10),
         if (activePermit == null)
-          _NoPermitCard(onRefresh: onRefresh)
+          _NoPermitCard(
+            onRefresh: onRefresh,
+            rejectedCount: rejected,
+            appealRejected: appealRejected,
+          )
         else
-          _PermitCard(permit: activePermit, onRefresh: onRefresh),
+          _PermitCard(
+            permit: activePermit,
+            onRefresh: onRefresh,
+            rejectedCount: rejected,
+            appealRejected: appealRejected,
+          ),
       ],
     );
   }
@@ -925,10 +624,19 @@ class _PermitSection extends StatelessWidget {
 
 class _NoPermitCard extends StatelessWidget {
   final VoidCallback onRefresh;
-  const _NoPermitCard({required this.onRefresh});
+  final int rejectedCount;
+  final bool appealRejected;
+  const _NoPermitCard({
+    required this.onRefresh,
+    this.rejectedCount = 0,
+    this.appealRejected = false,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final blocked = rejectedCount >= 3;
+    final deadEnd = blocked && appealRejected;
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -941,21 +649,74 @@ class _NoPermitCard extends StatelessWidget {
               'Чтобы въезжать на парковку, нужно получить одобренный пропуск для вашего автомобиля.',
               style: TextStyle(fontSize: 12, color: Colors.black54),
             ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                onPressed: () async {
-                  await showDialog(
-                    context: context,
-                    builder: (_) => _PermitSubmitDialog(onSubmitted: onRefresh),
-                  );
-                },
-                icon: const Icon(Icons.add_circle_outline),
-                label: const Text('Подать заявку'),
+            if (rejectedCount > 0 && !deadEnd) ...[
+              const SizedBox(height: 6),
+              Text(
+                'Отклонено заявок: $rejectedCount / 3',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: blocked ? Colors.red : Colors.orange,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
-            ),
+            ],
+            const SizedBox(height: 12),
+            if (deadEnd)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.red.withValues(alpha: 0.07),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.red.withValues(alpha: 0.3)),
+                ),
+                child: const Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.info_outline, color: Colors.red, size: 18),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Апелляция отклонена. Для решения вопроса обратитесь лично в управляющую компанию.',
+                        style: TextStyle(fontSize: 13, color: Colors.red),
+                      ),
+                    ),
+                  ],
+                ),
+              )
+            else
+              SizedBox(
+                width: double.infinity,
+                child: blocked
+                    ? FilledButton.icon(
+                        style: FilledButton.styleFrom(backgroundColor: Colors.orange),
+                        onPressed: () => _openSupportRequest(context),
+                        icon: const Icon(Icons.support_agent_outlined),
+                        label: const Text('Обратиться в поддержку'),
+                      )
+                    : FilledButton.icon(
+                        onPressed: () async {
+                          await showDialog(
+                            context: context,
+                            builder: (_) => _PermitSubmitDialog(onSubmitted: onRefresh),
+                          );
+                        },
+                        icon: const Icon(Icons.add_circle_outline),
+                        label: const Text('Подать заявку'),
+                      ),
+              ),
           ],
+        ),
+      ),
+    );
+  }
+
+  void _openSupportRequest(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => const ServiceRequestsPage(
+          prefilledTitle: 'Апелляция по паркингу',
         ),
       ),
     );
@@ -965,7 +726,14 @@ class _NoPermitCard extends StatelessWidget {
 class _PermitCard extends StatefulWidget {
   final ParkingPermit permit;
   final VoidCallback onRefresh;
-  const _PermitCard({required this.permit, required this.onRefresh});
+  final int rejectedCount;
+  final bool appealRejected;
+  const _PermitCard({
+    required this.permit,
+    required this.onRefresh,
+    this.rejectedCount = 0,
+    this.appealRejected = false,
+  });
 
   @override
   State<_PermitCard> createState() => _PermitCardState();
@@ -973,6 +741,79 @@ class _PermitCard extends StatefulWidget {
 
 class _PermitCardState extends State<_PermitCard> {
   bool _uploading = false;
+  bool _openingDoc = false;
+
+  Future<void> _openDoc() async {
+    final rawUrl = widget.permit.documentUrl;
+    if (rawUrl == null) return;
+    final host = ApiClient.baseHost;
+    final url = rawUrl
+        .replaceFirst(RegExp(r'http://localhost:\d+'), host)
+        .replaceFirst(RegExp(r'http://127\.0\.0\.1:\d+'), host)
+        .replaceFirst(RegExp(r'http://10\.0\.2\.2:\d+'), host);
+    final fileName = url.split('/').last.isNotEmpty ? url.split('/').last : 'document';
+
+    setState(() => _openingDoc = true);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Загрузка…'), duration: Duration(seconds: 60)),
+    );
+    try {
+      final res = await ApiClient.instance.downloadBytes(url);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      if (res.statusCode != 200 || res.data == null || res.data!.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Не удалось загрузить файл (HTTP ${res.statusCode})')),
+        );
+        return;
+      }
+      final bytes = Uint8List.fromList(res.data!);
+      final contentType = res.headers.value('content-type') ?? '';
+      final n = fileName.toLowerCase();
+      final isImage = n.endsWith('.jpg') || n.endsWith('.jpeg') || n.endsWith('.png') ||
+          n.endsWith('.webp') || contentType.startsWith('image/');
+      final isPdf = n.endsWith('.pdf') || contentType.contains('pdf');
+      if (isImage) {
+        await Navigator.push(context, MaterialPageRoute(
+          builder: (_) => Scaffold(
+            appBar: AppBar(title: Text(fileName, maxLines: 1, overflow: TextOverflow.ellipsis)),
+            body: InteractiveViewer(
+              minScale: 0.5, maxScale: 5,
+              child: Center(child: Image.memory(bytes)),
+            ),
+          ),
+        ));
+      } else if (isPdf) {
+        await Navigator.push(context, MaterialPageRoute(
+          builder: (_) => _DocViewerPage(title: fileName, bytes: bytes),
+        ));
+      } else {
+        final dir = await getTemporaryDirectory();
+        final clean = fileName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+        final file = File('${dir.path}/$clean');
+        await file.writeAsBytes(bytes, flush: true);
+        if (!mounted) return;
+        final result = await OpenFile.open(file.path);
+        if (result.type != ResultType.done) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Нет приложения для этого формата: ${result.message}')),
+          );
+        }
+      }
+    } on DioException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка сети: ${e.message}')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
+    } finally {
+      if (mounted) setState(() => _openingDoc = false);
+    }
+  }
 
   Future<void> _uploadDoc() async {
     final result = await FilePicker.platform.pickFiles(
@@ -1062,15 +903,86 @@ class _PermitCardState extends State<_PermitCard> {
               ),
             ],
             if (p.documentUrl != null) ...[
-              const SizedBox(height: 4),
-              const Row(
-                children: [
-                  Icon(Icons.attach_file, size: 14, color: Colors.black45),
-                  SizedBox(width: 4),
-                  Text('Документ прикреплён',
-                      style: TextStyle(fontSize: 12, color: Colors.black45)),
-                ],
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _openingDoc ? null : _openDoc,
+                  icon: _openingDoc
+                      ? const SizedBox(
+                          width: 14, height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.insert_drive_file_outlined, size: 16),
+                  label: const Text('Открыть документ'),
+                  style: OutlinedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
               ),
+            ],
+            if (p.isRejected) ...[
+              const SizedBox(height: 12),
+              if (!widget.appealRejected || widget.rejectedCount < 3)
+                Text(
+                  'Отклонено заявок: ${widget.rejectedCount} / 3',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: widget.rejectedCount >= 3 ? Colors.red : Colors.orange,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              const SizedBox(height: 8),
+              if (widget.appealRejected && widget.rejectedCount >= 3)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withValues(alpha: 0.07),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.red.withValues(alpha: 0.3)),
+                  ),
+                  child: const Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(Icons.info_outline, color: Colors.red, size: 18),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Апелляция отклонена. Для решения вопроса обратитесь лично в управляющую компанию.',
+                          style: TextStyle(fontSize: 13, color: Colors.red),
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              else
+                SizedBox(
+                  width: double.infinity,
+                  child: widget.rejectedCount >= 3
+                      ? FilledButton.icon(
+                          style: FilledButton.styleFrom(backgroundColor: Colors.orange),
+                          onPressed: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const ServiceRequestsPage(
+                                prefilledTitle: 'Апелляция по паркингу',
+                              ),
+                            ),
+                          ),
+                          icon: const Icon(Icons.support_agent_outlined),
+                          label: const Text('Обратиться в поддержку'),
+                        )
+                      : FilledButton.icon(
+                          onPressed: () async {
+                            await showDialog(
+                              context: context,
+                              builder: (_) => _PermitSubmitDialog(onSubmitted: widget.onRefresh),
+                            );
+                          },
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Подать снова'),
+                        ),
+                ),
             ],
           ],
         ),
@@ -1218,7 +1130,8 @@ class _PermitSubmitDialogState extends State<_PermitSubmitDialog> {
                         spacing: 8,
                         runSpacing: 8,
                         children: _permanentSpots.map((spot) {
-                          final isFree = spot.status == ParkingSpotStatus.free;
+                          final isAssigned = spot.assignedUserId != null;
+                          final isFree = spot.status == ParkingSpotStatus.free && !isAssigned;
                           final isSelected = _selectedSpotId == spot.id;
                           final color = isSelected
                               ? Colors.blue
@@ -1226,9 +1139,11 @@ class _PermitSubmitDialogState extends State<_PermitSubmitDialog> {
                                   ? Colors.green
                                   : Colors.red;
                           return GestureDetector(
-                            onTap: () => setState(() =>
-                                _selectedSpotId =
-                                    isSelected ? null : spot.id),
+                            onTap: isAssigned
+                                ? null
+                                : () => setState(() =>
+                                    _selectedSpotId =
+                                        isSelected ? null : spot.id),
                             child: Container(
                               width: 64,
                               height: 56,
@@ -1327,4 +1242,50 @@ String _fmtDate(DateTime dt) {
   final l = dt.toLocal();
   String p(int n) => n.toString().padLeft(2, '0');
   return '${p(l.day)}.${p(l.month)}.${l.year} ${p(l.hour)}:${p(l.minute)}';
+}
+
+class _DocViewerPage extends StatefulWidget {
+  final String title;
+  final List<int> bytes;
+  const _DocViewerPage({required this.title, required this.bytes});
+
+  @override
+  State<_DocViewerPage> createState() => _DocViewerPageState();
+}
+
+class _DocViewerPageState extends State<_DocViewerPage> {
+  bool _ready = false;
+  String? _error;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+      ),
+      body: Stack(
+        children: [
+          PDFView(
+            pdfData: Uint8List.fromList(widget.bytes),
+            enableSwipe: true,
+            swipeHorizontal: false,
+            autoSpacing: true,
+            onRender: (_) => setState(() => _ready = true),
+            onError: (e) => setState(() => _error = e.toString()),
+            onPageError: (_, e) => setState(() => _error = e.toString()),
+          ),
+          if (!_ready && _error == null)
+            const Center(child: CircularProgressIndicator()),
+          if (_error != null)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text('Не удалось отобразить PDF: $_error',
+                    textAlign: TextAlign.center),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 }

@@ -732,28 +732,55 @@ class _PermitsTabState extends State<_PermitsTab> {
       final ctrl = TextEditingController();
       final confirmed = await showDialog<bool>(
         context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Причина отклонения'),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: SingleChildScrollView(
-              child: TextField(
-                controller: ctrl,
-                decoration: const InputDecoration(
-                  hintText: 'Необязательно',
-                  border: OutlineInputBorder(),
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setDialogState) => AlertDialog(
+            title: const Text('Причина отклонения'),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (permit.documentUrl != null) ...[
+                      OutlinedButton.icon(
+                        onPressed: () => _openPermitDoc(permit),
+                        icon: const Icon(Icons.insert_drive_file_outlined, size: 16),
+                        label: const Text('Просмотреть документ'),
+                        style: OutlinedButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    TextField(
+                      controller: ctrl,
+                      onChanged: (_) => setDialogState(() {}),
+                      maxLines: 3,
+                      decoration: const InputDecoration(
+                        hintText: 'Укажите причину',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+              FilledButton(
+                onPressed: ctrl.text.trim().isEmpty
+                    ? null
+                    : () => Navigator.pop(ctx, true),
+                style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                child: const Text('Отклонить'),
+              ),
+            ],
           ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
-            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Отклонить')),
-          ],
         ),
       );
       if (confirmed != true) return;
-      comment = ctrl.text.trim().isEmpty ? null : ctrl.text.trim();
+      comment = ctrl.text.trim();
     }
     try {
       await ParkingService.instance.adminReviewPermit(permit.id, status, adminComment: comment);

@@ -42,6 +42,7 @@ class _DashboardPageState extends State<DashboardPage>
   String _role = 'resident';
   bool _isLoggedIn = false;
   String _verificationStatus = 'not_submitted';
+  String _parkingPermitStatus = '';
   String? _userId;
   int _unreadNotifications = 0;
 
@@ -72,6 +73,7 @@ class _DashboardPageState extends State<DashboardPage>
           _role = 'resident';
           _isLoggedIn = false;
           _verificationStatus = 'not_submitted';
+          _parkingPermitStatus = '';
           _userId = null;
           _loadingRole = false;
         });
@@ -81,6 +83,8 @@ class _DashboardPageState extends State<DashboardPage>
       final role = (res.data['role'] ?? 'resident').toString();
       final verification =
           (res.data['verification_status'] ?? 'not_submitted').toString();
+      final parkingPermit =
+          (res.data['parking_permit_status'] ?? '').toString();
       final userId = res.data['id']?.toString();
       await _api.updateRole(role);
       if (!mounted) return;
@@ -89,6 +93,7 @@ class _DashboardPageState extends State<DashboardPage>
         _userId = userId;
         _isLoggedIn = true;
         _verificationStatus = verification;
+        _parkingPermitStatus = parkingPermit;
         _loadingRole = false;
         final pageCount = _pageCountForRole(role);
         if (_index >= pageCount) _index = 0;
@@ -108,6 +113,7 @@ class _DashboardPageState extends State<DashboardPage>
         _role = 'resident';
         _isLoggedIn = false;
         _verificationStatus = 'not_submitted';
+        _parkingPermitStatus = '';
         _userId = null;
         _loadingRole = false;
       });
@@ -165,6 +171,7 @@ class _DashboardPageState extends State<DashboardPage>
         userId: _userId,
         isLoggedIn: _isLoggedIn,
         verificationStatus: _verificationStatus,
+        parkingPermitStatus: _parkingPermitStatus,
         onRefresh: _loadRole,
         unreadNotifications: _unreadNotifications,
         onNotificationsRead: _loadUnreadCount,
@@ -262,6 +269,7 @@ class _HomeOverviewTab extends StatelessWidget {
   final String? userId;
   final bool isLoggedIn;
   final String verificationStatus;
+  final String parkingPermitStatus;
   final Future<void> Function() onRefresh;
   final int unreadNotifications;
   final Future<void> Function() onNotificationsRead;
@@ -271,6 +279,7 @@ class _HomeOverviewTab extends StatelessWidget {
     this.userId,
     required this.isLoggedIn,
     required this.verificationStatus,
+    this.parkingPermitStatus = '',
     required this.onRefresh,
     this.unreadNotifications = 0,
     required this.onNotificationsRead,
@@ -278,6 +287,8 @@ class _HomeOverviewTab extends StatelessWidget {
 
   bool get _isAdmin => role == 'admin';
   bool get _isApprovedResident => verificationStatus == 'approved';
+  bool get _hasParkingAccess =>
+      verificationStatus == 'approved' || parkingPermitStatus == 'approved';
 
   @override
   Widget build(BuildContext context) {
@@ -522,7 +533,7 @@ class _HomeOverviewTab extends StatelessWidget {
             _ParkingStatusCard(
               mode: !isLoggedIn
                   ? _ParkingCardMode.guest
-                  : _isApprovedResident
+                  : _hasParkingAccess
                       ? _ParkingCardMode.resident
                       : _ParkingCardMode.unverified,
               userId: userId,

@@ -7,7 +7,8 @@ import 'package:image_picker/image_picker.dart';
 import '../services/api_client.dart';
 
 class CreateRequestSheet extends StatefulWidget {
-  const CreateRequestSheet({super.key});
+  final String? prefilledDescription;
+  const CreateRequestSheet({super.key, this.prefilledDescription});
 
   @override
   State<CreateRequestSheet> createState() => _CreateRequestSheetState();
@@ -24,6 +25,14 @@ class _CreateRequestSheetState extends State<CreateRequestSheet> {
   String _selected = 'Лифт';
   final List<XFile> _photos = [];
   bool _submitting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.prefilledDescription != null) {
+      _desc.text = widget.prefilledDescription!;
+    }
+  }
 
   @override
   void dispose() {
